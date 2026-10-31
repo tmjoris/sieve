@@ -141,6 +141,7 @@ public final class DemoServer implements AutoCloseable {
                 .orElse(Priority.BEST_EFFORT);
 
         long start = System.nanoTime();
+        metrics.arrived(priority);
         Admission.Permit permit = null;
         if (sieve != null) {
             switch (sieve.admit(priority)) {

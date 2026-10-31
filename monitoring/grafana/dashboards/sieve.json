@@ -14,6 +14,62 @@
   ],
   "panels": [
     {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Offered load vs goodput (all tiers, requests/s)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(sieve_requests_arrived_total[5s]))",
+          "legendFormat": "offered",
+          "refId": "A",
+          "interval": "1s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(sieve_requests_total{outcome=\"ok\"}[5s]))",
+          "legendFormat": "goodput",
+          "refId": "B",
+          "interval": "1s"
+        }
+      ]
+    },
+    {
       "id": 1,
       "type": "timeseries",
       "title": "Goodput by tier (served requests/s)",
@@ -23,7 +79,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 8,
         "w": 12,
         "h": 8
       },
@@ -57,7 +113,8 @@
           },
           "expr": "sum by (tier) (rate(sieve_requests_total{outcome=\"ok\"}[5s]))",
           "legendFormat": "{{tier}}",
-          "refId": "A"
+          "refId": "A",
+          "interval": "1s"
         }
       ]
     },
@@ -71,7 +128,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 0,
+        "y": 8,
         "w": 12,
         "h": 8
       },
@@ -105,7 +162,8 @@
           },
           "expr": "sum by (tier) (rate(sieve_requests_total{outcome=~\"shed_.*\"}[5s]))",
           "legendFormat": "{{tier}}",
-          "refId": "A"
+          "refId": "A",
+          "interval": "1s"
         }
       ]
     },
@@ -119,7 +177,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 16,
         "w": 12,
         "h": 8
       },
@@ -153,7 +211,8 @@
           },
           "expr": "histogram_quantile(0.99, sum by (tier, le) (rate(sieve_request_duration_seconds_bucket[5s])))",
           "legendFormat": "{{tier}}",
-          "refId": "A"
+          "refId": "A",
+          "interval": "1s"
         }
       ]
     },
@@ -167,7 +226,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 8,
+        "y": 16,
         "w": 12,
         "h": 8
       },
@@ -201,21 +260,22 @@
           },
           "expr": "histogram_quantile(0.5, sum by (tier, le) (rate(sieve_request_duration_seconds_bucket[5s])))",
           "legendFormat": "{{tier}}",
-          "refId": "A"
+          "refId": "A",
+          "interval": "1s"
         }
       ]
     },
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Availability by tier (served / arrived)",
+      "title": "Availability by tier (served / arrived, server view)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
-        "y": 16,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -247,9 +307,10 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (tier) (rate(sieve_requests_total{outcome=\"ok\"}[5s])) / sum by (tier) (rate(sieve_requests_total[5s]))",
+          "expr": "sum by (tier) (rate(sieve_requests_total{outcome=\"ok\"}[5s])) / sum by (tier) (rate(sieve_requests_arrived_total[5s]))",
           "legendFormat": "{{tier}}",
-          "refId": "A"
+          "refId": "A",
+          "interval": "1s"
         }
       ]
     },
@@ -263,7 +324,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 16,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -297,7 +358,8 @@
           },
           "expr": "sum by (outcome) (rate(sieve_requests_total{outcome=~\"shed_.*\"}[5s]))",
           "legendFormat": "{{outcome}}",
-          "refId": "A"
+          "refId": "A",
+          "interval": "1s"
         }
       ]
     }

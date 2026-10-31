@@ -124,21 +124,112 @@ and the seconds per phase. Clients choose a tier with the `X-Sieve-Priority` hea
 (`critical`, `degraded`, `best_effort`, `bulk`); requests without it are treated as best-effort.
 Shed requests get a `503` with `Retry-After: 1`.
 
-## Results (demo backend, one machine)
+## Results
 
-Spike profile (`scripts/spike.sh`): 100 rps baseline, ramp to 600 rps (6x), hold 30 s, recover.
-The demo backend serves about 200 rps, so the peak is about 3x its capacity. Success is the
-client view (a 503 or a timeout is a failure). Latency is the p99 of requests that were served,
-estimated from the server's histogram.
+Everything below was measured on one 4-core machine against the demo backend, with the load
+generator on the same machine. The numbers show how the pieces behave relative to each other;
+they are not claims about production capacity.
 
-| Mode | Critical | Degraded | Best-effort | Bulk | Critical p99 |
-|---|---|---|---|---|---|
-| No protection (1 run) | 20% | 20% | 20% | 20% | 5 s+ (timeouts) |
-| Shed curves + windowed limiter (3 runs) | 99.8-100% | 47-49% | 21-22% | 18-19% | 116-234 ms |
+### 6x spike (Gatling, `scripts/spike.sh`)
 
-Caveats: the backend is simulated (sleep-based, not CPU-bound), the load generator and server
-share one machine, and the baseline is a single run. The CPU signal has not been exercised
-against a CPU-bound workload yet.
+100 rps baseline, ramp to 600 rps, hold 30 s, recover. The sleep-based backend serves about
+200 rps, so the peak is about 3x its capacity. Success is the client view (a 503 or a timeout is a
+failure). Latency is for served requests, estimated from the server's histogram. Three rounds per
+mode, interleaved to cancel drift.
+
+| Mode | Critical success | Critical p50 / p99 | Degraded / best-effort / bulk success |
+|---|---|---|---|
+| No protection | 20.4% | timeouts (5 s) | 20.5 / 20.4 / 20.4% |
+| Limiter only (windowed Gradient2) | 100% (3/3) | 68 / 99 ms | 36.5 / 35.6 / 39.5%, no ordering |
+| Shed curves + limiter, default thresholds | 99.4% (98.4-100) | 23 / 151-239 ms | 46.2 / 21.6 / 18.5%, ordered |
+| Shed curves + limiter, tuned thresholds | 100% (3/3) | 21 / 194-216 ms | 43.3 / 20.7 / 17.7%, ordered |
+
+What this shows:
+
+- Without protection, every tier fails equally and latency runs into the client timeout.
+- The windowed adaptive limiter alone already keeps critical traffic available on this backend.
+- The shed curves add two things: about 3x lower median latency for critical requests, and a real
+  priority order among the lower tiers (degraded is served more than best-effort, more than bulk).
+  The limiter alone treats those three the same.
+- The tuned thresholds are not distinguishable from the hand-picked defaults on goodput.
+
+### Dashboards
+
+Prometheus and Grafana (`monitoring/`, `docker compose up -d`) with a provisioned dashboard.
+The same spike, without protection and with Sieve:
+
+![Spike without protection](docs/grafana-noshed.png)
+
+Without protection, goodput is stuck at the backend's capacity while latency climbs to tens of
+seconds. The server keeps finishing a backlog of requests whose clients gave up after 5 s, which
+is why "availability" in the server's own view rises above 100% at the end; the client view in the
+table above is the real one.
+
+![Spike with Sieve](docs/grafana-shed.png)
+
+With Sieve, offered load reaches 600 req/s while goodput holds near capacity. All critical
+traffic (120 req/s) is served and the lower tiers absorb the shedding. The flat 100 ms p99 is the
+histogram's bucket boundary, not a measurement of exactly 100 ms.
+
+### Retry storms (`scripts/retry-storm.sh`)
+
+A sudden 600 rps for 10 s against the shedding server, with clients retrying three ways. "Load"
+is calls sent to the server per original request. Three runs each.
+
+| Client retries | Critical success | Critical p99 | Degraded success | Load, degraded tier |
+|---|---|---|---|---|
+| None | 98.4% | 196 ms | 34.5% | 1.00x |
+| Naive: 2 immediate retries | 93.7% (90.0-97.4) | 1.6 s | 18.8% | 2.77x |
+| `RetryPolicy` (budget) | 100.0% (99.9-100) | 1.2 s | 35.0% | 1.00x |
+
+Naive retries make the overload worse: they nearly triple the load from the lower tiers and cost
+critical traffic availability. The retry budget adds only 3% load, because the lower tiers'
+`Retry-After` hints (2-10 s) exceed the 1 s it is willing to wait. The cost is that a retried
+critical request waits out its 1 s `Retry-After`, which is why its p99 is about 1.2 s.
+
+Against a server with no shedding, nothing helps (about 22% success whichever way clients retry),
+but naive retries still send 2.5x the calls.
+
+### CPU-bound backend
+
+The demo can burn CPU instead of sleeping (`SIEVE_BACKEND=cpu`). 4 spinning workers serve about
+200 rps; load goes from 50 to 300 rps. Two rounds per mode, system CPU as the signal with a 50%
+autoscaling target (non-critical shedding from 60% CPU, critical from 80%).
+
+| Mode | Critical success | Critical p99 | Degraded / best-effort / bulk success |
+|---|---|---|---|
+| No protection | 41% | timeouts (5 s) | 41 / 41 / 41% |
+| CPU signal only | 95.5-96.2% | 98-139 ms | 60 / 40 / 24% |
+| CPU + latency signals | 95.8-96.3% | 99-100 ms | 61 / 40 / 23% |
+
+The CPU signal alone orders the tiers and keeps latency low. Critical traffic is not fully
+protected (about 96%): at saturation the CPU sits above 80%, where the curve starts shedding
+critical requests, and the machine-wide reading includes the load generator. This matches the
+design in Netflix's talk, which also notes that CPU saturates and stops reflecting load once a
+service is shedding.
+
+### Auto-tuner (`sieve-demo`, `Tuner`)
+
+Coordinate descent over the shedding thresholds, each trial a real server process under a real
+spike, averaged over two runs. The score requires critical success of at least 99% and p99 under
+400 ms, then rewards the weighted goodput of the other tiers. Two search runs agreed on the
+shape of the landscape:
+
+- A 40 ms latency target sheds too much (best-effort success falls to 2%).
+- A 90 ms target or looser admits more lower-tier traffic (17-20% each) but critical drops to
+  about 98% and the trial is rejected.
+- Around 60 ms the score is a plateau, so the tuned configuration (+8% score) did not validate as
+  better than the defaults in the full spike above.
+
+### Limitations
+
+- The backend is simulated and the machine is shared with the load generator.
+- Latency figures are sensitive to machine load: two further shed runs taken while the Prometheus
+  and Grafana containers were running had critical p50 of 62-65 ms (against 21-24 ms), with
+  similar availability.
+- Per-tier p99 comes from histogram buckets and is coarse.
+- The limiter's tight floor and starting limit (4 and 10) are tuned to this 4-worker backend and
+  are not general defaults. The library's own defaults (20 and 20) are looser.
 
 ## Known issues
 

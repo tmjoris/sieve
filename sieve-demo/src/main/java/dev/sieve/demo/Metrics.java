@@ -20,9 +20,10 @@ final class Metrics {
         }
     }
 
-    private static final double[] BUCKETS = {0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5};
+    private static final double[] BUCKETS = {0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30};
 
     private final Map<Priority, Map<Outcome, LongAdder>> outcomes = new EnumMap<>(Priority.class);
+    private final Map<Priority, LongAdder> arrived = new EnumMap<>(Priority.class);
     private final Map<Priority, LongAdder[]> buckets = new EnumMap<>(Priority.class);
     private final Map<Priority, LongAdder> latencyNanosSum = new EnumMap<>(Priority.class);
 
@@ -39,7 +40,13 @@ final class Metrics {
             }
             buckets.put(p, b);
             latencyNanosSum.put(p, new LongAdder());
+            arrived.put(p, new LongAdder());
         }
+    }
+
+    /** A request reached the server, whatever happens to it next. */
+    void arrived(Priority p) {
+        arrived.get(p).increment();
     }
 
     void count(Priority p, Outcome o) {
@@ -61,6 +68,11 @@ final class Metrics {
 
     String render() {
         StringBuilder sb = new StringBuilder();
+        sb.append("# TYPE sieve_requests_arrived_total counter\n");
+        for (Priority p : Priority.values()) {
+            sb.append("sieve_requests_arrived_total{tier=\"").append(p.id()).append("\"} ")
+                    .append(arrived.get(p).sum()).append('\n');
+        }
         sb.append("# TYPE sieve_requests_total counter\n");
         for (Priority p : Priority.values()) {
             for (Outcome o : Outcome.values()) {
