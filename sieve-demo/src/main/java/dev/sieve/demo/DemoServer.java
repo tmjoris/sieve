@@ -41,9 +41,9 @@ public final class DemoServer {
         Sieve sieve = switch (mode) {
             case "noshed" -> null;
             case "limiter" -> Sieve.builder(
-                    PriorityLimiter.withGradient2(TierShares.criticalFirst())).build();
+                    limiter()).build();
             case "shed" -> Sieve.builder(
-                            PriorityLimiter.withGradient2(TierShares.criticalFirst()))
+                            limiter())
                     // Target: shed lower tiers, never critical, as requests pass the SLO.
                     .latencySlo(LatencySloSignal.of(Duration.ofMillis(SLO_MS)),
                             ShedCurve.prioritized(0.10, 0.40))
@@ -69,6 +69,27 @@ public final class DemoServer {
         server.start();
         System.out.println("listening on " + port + " mode=" + mode
                 + " capacity~" + (WORKERS * 1000 / SERVICE_MS) + "rps");
+    }
+
+    /**
+     * Windowed Gradient2 sized for this backend (4 workers): start at 10, never below 4. Override
+     * with SIEVE_INITIAL_LIMIT, SIEVE_MIN_LIMIT, SIEVE_MAX_LIMIT; set SIEVE_WINDOWED=0 to use
+     * bare Gradient2 instead.
+     */
+    private static PriorityLimiter limiter() {
+        int initial = intEnv("SIEVE_INITIAL_LIMIT", 10);
+        int min = intEnv("SIEVE_MIN_LIMIT", 4);
+        int max = intEnv("SIEVE_MAX_LIMIT", 200);
+        boolean windowed = !"0".equals(System.getenv("SIEVE_WINDOWED"));
+        return windowed
+                ? PriorityLimiter.withWindowedGradient2(
+                        TierShares.criticalFirst(), initial, min, max)
+                : PriorityLimiter.withGradient2(TierShares.criticalFirst(), initial, min, max);
+    }
+
+    private static int intEnv(String name, int fallback) {
+        String v = System.getenv(name);
+        return v == null ? fallback : Integer.parseInt(v);
     }
 
     private static void handle(
