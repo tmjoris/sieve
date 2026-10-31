@@ -54,24 +54,36 @@ public final class DemoServer {
             default -> throw new IllegalArgumentException("mode: noshed|limiter|shed");
         };
         Semaphore workers = new Semaphore(WORKERS);
+        Metrics metrics = new Metrics();
 
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 4096);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-        server.createContext("/work", ex -> handle(ex, sieve, workers));
+        server.createContext("/work", ex -> handle(ex, sieve, workers, metrics));
+        server.createContext("/metrics", ex -> {
+            byte[] body = metrics.render().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "text/plain; version=0.0.4");
+            ex.sendResponseHeaders(200, body.length);
+            ex.getResponseBody().write(body);
+            ex.close();
+        });
         server.start();
         System.out.println("listening on " + port + " mode=" + mode
                 + " capacity~" + (WORKERS * 1000 / SERVICE_MS) + "rps");
     }
 
-    private static void handle(HttpExchange ex, Sieve sieve, Semaphore workers)
+    private static void handle(
+            HttpExchange ex, Sieve sieve, Semaphore workers, Metrics metrics)
             throws IOException {
         Priority priority = Priority.parse(ex.getRequestHeaders().getFirst(Priority.HEADER))
                 .orElse(Priority.BEST_EFFORT);
 
+        long start = System.nanoTime();
         Admission.Permit permit = null;
         if (sieve != null) {
             switch (sieve.admit(priority)) {
                 case Admission.Shed shed -> {
+                    metrics.count(priority, shed.reason() == Admission.Reason.UTILIZATION
+                            ? Metrics.Outcome.SHED_UTILIZATION : Metrics.Outcome.SHED_LIMIT);
                     ex.getResponseHeaders().add(
                             "Retry-After", Long.toString(shed.retryAfter().toSeconds()));
                     ex.sendResponseHeaders(503, -1);
@@ -90,6 +102,7 @@ public final class DemoServer {
                 workers.release();
             }
             ex.sendResponseHeaders(200, -1);
+            metrics.served(priority, System.nanoTime() - start);
             if (permit != null) {
                 permit.success();
             }
