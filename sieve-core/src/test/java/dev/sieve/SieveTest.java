@@ -103,4 +103,39 @@ class SieveTest {
         admitted.permit().dropped();
         assertEquals(1.0, slo.utilization());
     }
+
+    @Test
+    void criticalIsOnlyShedWhenRequestsApproachTheTimeout() {
+        // 50 ms target, 500 ms max. Requests at 200 ms breach the target but not the max.
+        LatencySloSignal target =
+                new LatencySloSignal(50_000_000L, 5_000_000_000L, 10, 1, now::get);
+        LatencySloSignal max =
+                new LatencySloSignal(500_000_000L, 5_000_000_000L, 10, 1, now::get);
+        Sieve s = Sieve.builder(
+                        new PriorityLimiter(FixedLimit.of(100), TierShares.criticalFirst()))
+                .latencySlo(target, ShedCurve.prioritized(0.10, 0.40))
+                .latencySlo(max, ShedCurve.unprioritized(0.10, 0.40))
+                .clock(now::get)
+                .random(() -> 0.0)
+                .build();
+
+        for (int i = 0; i < 10; i++) {
+            var a = assertInstanceOf(Admission.Admitted.class, s.admit(Priority.CRITICAL));
+            now.addAndGet(200_000_000L);
+            a.permit().success();
+        }
+        assertEquals(1.0, target.utilization());
+        assertEquals(0.0, max.utilization());
+        shed(s.admit(Priority.BULK));
+        assertInstanceOf(Admission.Admitted.class, s.admit(Priority.CRITICAL));
+
+        // Now requests blow past the timeout threshold too.
+        var batch = new java.util.ArrayList<Admission.Admitted>();
+        for (int i = 0; i < 10; i++) {
+            batch.add(assertInstanceOf(Admission.Admitted.class, s.admit(Priority.CRITICAL)));
+        }
+        now.addAndGet(900_000_000L);
+        batch.forEach(a -> a.permit().success());
+        shed(s.admit(Priority.CRITICAL));
+    }
 }

@@ -2,6 +2,8 @@ package dev.sieve;
 
 import com.netflix.concurrency.limits.Limiter;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
@@ -15,14 +17,14 @@ public final class Sieve {
 
     private final PriorityLimiter limiter;
     private final ShedPolicy policy;
-    private final LatencySloSignal latency;
+    private final List<LatencySloSignal> latency;
     private final LongSupplier clock;
     private final DoubleSupplier random;
 
     private Sieve(Builder b) {
         this.limiter = b.limiter;
         this.policy = b.policy.build();
-        this.latency = b.latency;
+        this.latency = List.copyOf(b.latency);
         this.clock = b.clock;
         this.random = b.random;
     }
@@ -64,17 +66,14 @@ public final class Sieve {
         @Override
         public void success() {
             listener.onSuccess();
-            if (latency != null) {
-                latency.record(clock.getAsLong() - startNanos);
-            }
+            long took = clock.getAsLong() - startNanos;
+            latency.forEach(sig -> sig.record(took));
         }
 
         @Override
         public void dropped() {
             listener.onDropped();
-            if (latency != null) {
-                latency.record(Long.MAX_VALUE);
-            }
+            latency.forEach(sig -> sig.record(Long.MAX_VALUE));
         }
 
         @Override
@@ -86,7 +85,7 @@ public final class Sieve {
     public static final class Builder {
         private final PriorityLimiter limiter;
         private final ShedPolicy.Builder policy = ShedPolicy.builder();
-        private LatencySloSignal latency;
+        private final List<LatencySloSignal> latency = new ArrayList<>();
         private LongSupplier clock = System::nanoTime;
         private DoubleSupplier random = () -> ThreadLocalRandom.current().nextDouble();
 
@@ -99,9 +98,14 @@ public final class Sieve {
             return this;
         }
 
-        /** Shed on the fraction of requests slower than the SLO; latencies are recorded for you. */
+        /**
+         * Shed on the fraction of requests slower than a latency threshold; latencies are
+         * recorded for you. Call it twice for Netflix's pair: a target threshold with
+         * {@link ShedCurve#prioritized}, and a max (timeout) threshold with
+         * {@link ShedCurve#unprioritized}.
+         */
         public Builder latencySlo(LatencySloSignal signal, ShedCurve curve) {
-            this.latency = signal;
+            this.latency.add(signal);
             policy.signal(signal, curve);
             return this;
         }

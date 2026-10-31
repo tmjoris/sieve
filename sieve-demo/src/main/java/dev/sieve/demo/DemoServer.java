@@ -24,7 +24,7 @@ import java.util.concurrent.Semaphore;
  * <ul>
  *   <li>noshed: no protection at all
  *   <li>limiter: only the partitioned adaptive concurrency limit
- *   <li>shed: shed curve on latency-SLO utilization, plus the limiter as backstop
+ *   <li>shed: shed curves on target and max latency utilization, plus the limiter as backstop
  * </ul>
  */
 public final class DemoServer {
@@ -32,6 +32,7 @@ public final class DemoServer {
     static final int WORKERS = 4;
     static final int SERVICE_MS = 20;
     static final int SLO_MS = 60;
+    static final int MAX_MS = 300;
 
     public static void main(String[] args) throws IOException {
         String mode = args.length < 1 ? "shed" : args[0];
@@ -43,8 +44,12 @@ public final class DemoServer {
                     PriorityLimiter.withGradient2(TierShares.criticalFirst())).build();
             case "shed" -> Sieve.builder(
                             PriorityLimiter.withGradient2(TierShares.criticalFirst()))
+                    // Target: shed lower tiers, never critical, as requests pass the SLO.
                     .latencySlo(LatencySloSignal.of(Duration.ofMillis(SLO_MS)),
-                            ShedCurve.latencySlo())
+                            ShedCurve.prioritized(0.10, 0.40))
+                    // Max: when requests approach timing out, shed everything.
+                    .latencySlo(LatencySloSignal.of(Duration.ofMillis(MAX_MS)),
+                            ShedCurve.unprioritized(0.10, 0.40))
                     .build();
             default -> throw new IllegalArgumentException("mode: noshed|limiter|shed");
         };

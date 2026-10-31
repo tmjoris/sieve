@@ -66,13 +66,37 @@ class ShedCurveTest {
     }
 
     @Test
-    void overlappingRampsAreRejected() {
+    void lowerTierShedLaterThanHigherTierIsRejected() {
         Map<Priority, ShedCurve.Ramp> m = new EnumMap<>(Priority.class);
         m.put(Priority.CRITICAL, new ShedCurve.Ramp(0.5, 0.9));
-        m.put(Priority.DEGRADED, new ShedCurve.Ramp(0.4, 0.6)); // full 0.6 > critical start 0.5
+        m.put(Priority.DEGRADED, new ShedCurve.Ramp(0.6, 0.9)); // starts after critical
         m.put(Priority.BEST_EFFORT, new ShedCurve.Ramp(0.2, 0.3));
         m.put(Priority.BULK, new ShedCurve.Ramp(0.1, 0.2));
         assertThrows(IllegalArgumentException.class, () -> new ShedCurve(m));
+    }
+
+    @Test
+    void shedTierAboveAnUnshedTierIsRejected() {
+        Map<Priority, ShedCurve.Ramp> m = new EnumMap<>(Priority.class);
+        m.put(Priority.CRITICAL, new ShedCurve.Ramp(0.5, 0.9));
+        assertThrows(IllegalArgumentException.class, () -> new ShedCurve(m));
+    }
+
+    @Test
+    void prioritizedCurveNeverShedsCritical() {
+        ShedCurve c = ShedCurve.prioritized(0.10, 0.40);
+        assertEquals(0.0, c.probability(Priority.CRITICAL, 1.0));
+        assertEquals(1.0, c.probability(Priority.DEGRADED, 0.40));
+        assertEquals(0.0, c.probability(Priority.BULK, 0.10));
+        assertEquals(1.0, c.probability(Priority.BULK, 0.20), 1e-9);
+    }
+
+    @Test
+    void unprioritizedCurveShedsEveryTierEqually() {
+        ShedCurve c = ShedCurve.unprioritized(0.2, 0.6);
+        for (Priority p : Priority.values()) {
+            assertEquals(0.5, c.probability(p, 0.4), 1e-9);
+        }
     }
 
     @Test
