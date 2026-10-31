@@ -30,14 +30,22 @@ per tier.
 BIN=sieve-demo/build/install/sieve-demo/bin/sieve-demo
 CP="sieve-demo/build/install/sieve-demo/lib/*"
 
-# 1. Baseline, no shedding
+# The first phase doubles as JVM warm-up, so ignore it (see "Known issues").
+RATES=100,100,200,400,800
+
+# 1. Baseline, no protection
 $BIN noshed 8080 &
-java -cp "$CP" dev.sieve.demo.LoadProbe 8080 100,200,400,800 6
+java -cp "$CP" dev.sieve.demo.LoadProbe 8080 $RATES 6
 kill %1
 
-# 2. With shedding
+# 2. Adaptive concurrency limit only
+$BIN limiter 8080 &
+java -cp "$CP" dev.sieve.demo.LoadProbe 8080 $RATES 6
+kill %1
+
+# 3. Shed curve on latency-SLO utilization, plus the limiter as backstop
 $BIN shed 8080 &
-java -cp "$CP" dev.sieve.demo.LoadProbe 8080 100,200,400,800 6
+java -cp "$CP" dev.sieve.demo.LoadProbe 8080 $RATES 6
 kill %1
 ```
 
@@ -45,6 +53,14 @@ kill %1
 and the seconds per phase. Clients choose a tier with the `X-Sieve-Priority` header
 (`critical`, `degraded`, `best_effort`, `bulk`); requests without it are treated as best-effort.
 Shed requests get a `503` with `Retry-After: 1`.
+
+## Known issues
+
+- **Cold start.** In `shed` mode the first seconds after startup can shed most traffic: JIT
+  warm-up makes early requests slow, the latency signal reads high, and when everything is
+  shed no fast requests arrive to bring it back down until the 5 s window expires. A repeat of
+  the same phase is clean. Not fixed yet.
+- Results vary between runs; one run proves little.
 
 ## Design
 
