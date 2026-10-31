@@ -34,6 +34,16 @@ public final class CpuSignal implements UtilizationSignal, AutoCloseable {
         return new CpuSignal(os::getCpuLoad, 250, 0.5);
     }
 
+    /**
+     * CPU used by this JVM process alone, as a fraction of the machine. Unlike {@link #system()}
+     * it ignores other processes on the box (a load generator, a sidecar, a noisy neighbour).
+     */
+    public static CpuSignal process() {
+        var os = (com.sun.management.OperatingSystemMXBean)
+                ManagementFactory.getOperatingSystemMXBean();
+        return new CpuSignal(os::getProcessCpuLoad, 250, 0.5);
+    }
+
     private void sample(DoubleSupplier source) {
         double v = source.getAsDouble();
         if (v < 0 || Double.isNaN(v)) {

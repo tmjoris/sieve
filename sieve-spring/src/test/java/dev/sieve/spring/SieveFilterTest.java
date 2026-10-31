@@ -65,7 +65,7 @@ class SieveFilterTest {
             boolean[] reached = {false};
             f.doFilter(request("critical"), res2, (a, b) -> reached[0] = true);
             assertEquals(503, res2.getStatus());
-            assertEquals("1", res2.getHeader("Retry-After"));
+            assertEquals("0", res2.getHeader("Retry-After"));
             assertEquals("concurrency_limit", res2.getHeader(SieveFilter.SHED_REASON_HEADER));
             assertEquals(false, reached[0]);
         };

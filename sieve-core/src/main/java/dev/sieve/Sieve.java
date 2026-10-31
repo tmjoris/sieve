@@ -45,10 +45,13 @@ public final class Sieve {
         return new Admission.Admitted(new TrackedPermit(listener.get()));
     }
 
-    /** Lower tiers are told to stay away longer. */
+    /**
+     * Lower tiers are told to stay away longer. Critical requests may retry at once: the client's
+     * jittered backoff spreads them out, and Netflix has higher priorities retry more aggressively.
+     */
     static Duration retryAfter(Priority priority) {
         return switch (priority) {
-            case CRITICAL -> Duration.ofSeconds(1);
+            case CRITICAL -> Duration.ZERO;
             case DEGRADED -> Duration.ofSeconds(2);
             case BEST_EFFORT -> Duration.ofSeconds(5);
             case BULK -> Duration.ofSeconds(10);

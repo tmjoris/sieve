@@ -65,4 +65,39 @@ class LatencySloSignalTest {
         }
         assertEquals(1.0, signal.utilization());
     }
+
+    @Test
+    void cachedReadsOnlyRefreshAfterTheInterval() {
+        // refresh every 100 ms
+        LatencySloSignal cachedSignal =
+                new LatencySloSignal(50 * MS, 5_000 * MS, 10, 1, 100 * MS, now::get);
+        cachedSignal.record(200 * MS);
+        assertEquals(1.0, cachedSignal.utilization()); // first read computes
+        for (int i = 0; i < 50; i++) {
+            cachedSignal.record(10 * MS); // now 1 slow of 51
+        }
+        assertEquals(1.0, cachedSignal.utilization(), "still the cached value");
+        now.addAndGet(100 * MS);
+        assertEquals(1.0 / 51, cachedSignal.utilization(), 1e-9);
+    }
+
+    @Test
+    void concurrentRecordingLosesNothing() throws Exception {
+        LatencySloSignal s = new LatencySloSignal(50 * MS, 5_000 * MS, 10, 1, now::get);
+        int threads = 8;
+        int each = 50_000;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var done = new java.util.concurrent.CountDownLatch(threads);
+        for (int t = 0; t < threads; t++) {
+            pool.submit(() -> {
+                for (int i = 0; i < each; i++) {
+                    s.record(i % 4 == 0 ? 200 * MS : 10 * MS); // a quarter are slow
+                }
+                done.countDown();
+            });
+        }
+        done.await();
+        pool.shutdown();
+        assertEquals(0.25, s.utilization(), 1e-9);
+    }
 }
