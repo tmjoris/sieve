@@ -75,7 +75,9 @@ public final class DemoServer implements AutoCloseable {
                             ShedCurve.unprioritized(c.maxLo(), c.maxHi()));
                 }
                 if (c.cpuAutoscaleTarget() != null) {
-                    cpu = CpuSignal.system();
+                    // SIEVE_CPU_SCOPE=process ignores other processes on the machine.
+                    cpu = "process".equals(System.getenv("SIEVE_CPU_SCOPE"))
+                            ? CpuSignal.process() : CpuSignal.system();
                     b.utilization(cpu, ShedCurve.cpu(c.cpuAutoscaleTarget()));
                 }
                 yield b.build();

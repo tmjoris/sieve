@@ -20,7 +20,17 @@ final class Metrics {
         }
     }
 
-    private static final double[] BUCKETS = {0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30};
+    /** Geometric buckets, 1 ms to 30 s with a 1.25x step, so a bucket-estimated p99 is within 25%. */
+    private static final double[] BUCKETS = buckets();
+
+    private static double[] buckets() {
+        java.util.List<Double> b = new java.util.ArrayList<>();
+        for (double v = 0.001; v < 30; v *= 1.25) {
+            b.add(Double.parseDouble(String.format("%.4g", v)));
+        }
+        b.add(30.0);
+        return b.stream().mapToDouble(Double::doubleValue).toArray();
+    }
 
     private final Map<Priority, Map<Outcome, LongAdder>> outcomes = new EnumMap<>(Priority.class);
     private final Map<Priority, LongAdder> arrived = new EnumMap<>(Priority.class);
