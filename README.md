@@ -5,6 +5,47 @@ Prioritized load shedding for Java 21 services, built on Netflix's
 
 Work in progress. Numbers will be added here only once they are measured.
 
+## Requirements
+
+- JDK 21
+- Nothing else to install. The Gradle wrapper downloads Gradle on first use.
+
+## Build and test
+
+```bash
+git clone https://github.com/tmjoris/sieve.git
+cd sieve
+./gradlew build
+```
+
+## Run the demo
+
+The demo is a small HTTP server with a simulated backend that can serve about 200 requests per
+second (4 workers, 20 ms per request). `LoadProbe` sends load at a fixed rate with a mix of
+20% critical, 30% degraded, 30% best-effort and 20% bulk, and prints success rate and latency
+per tier.
+
+```bash
+./gradlew :sieve-demo:installDist
+BIN=sieve-demo/build/install/sieve-demo/bin/sieve-demo
+CP="sieve-demo/build/install/sieve-demo/lib/*"
+
+# 1. Baseline, no shedding
+$BIN noshed 8080 &
+java -cp "$CP" dev.sieve.demo.LoadProbe 8080 100,200,400,800 6
+kill %1
+
+# 2. With shedding
+$BIN shed 8080 &
+java -cp "$CP" dev.sieve.demo.LoadProbe 8080 100,200,400,800 6
+kill %1
+```
+
+`LoadProbe` arguments are the port, a comma-separated list of request rates (one phase each),
+and the seconds per phase. Clients choose a tier with the `X-Sieve-Priority` header
+(`critical`, `degraded`, `best_effort`, `bulk`); requests without it are treated as best-effort.
+Shed requests get a `503` with `Retry-After: 1`.
+
 ## Design
 
 Requests carry one of four priorities: `CRITICAL`, `DEGRADED`, `BEST_EFFORT`, `BULK`.
