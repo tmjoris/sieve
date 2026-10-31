@@ -3,6 +3,7 @@ package dev.sieve.demo;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import dev.sieve.Admission;
+import dev.sieve.CpuSignal;
 import dev.sieve.LatencySloSignal;
 import dev.sieve.Priority;
 import dev.sieve.PriorityLimiter;
@@ -11,90 +12,128 @@ import dev.sieve.Sieve;
 import dev.sieve.TierShares;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 
 /**
- * Demo backend with fixed capacity: WORKERS slots, each request holds one for SERVICE_MS.
- * Capacity is therefore WORKERS * 1000 / SERVICE_MS requests per second. Excess requests queue
- * for a slot, so latency climbs under overload unless the limiter sheds.
+ * Demo backend with fixed capacity: {@code workers} slots, each request holds one for
+ * {@code serviceMs}. Capacity is workers * 1000 / serviceMs requests per second. Excess requests
+ * queue for a slot, so latency climbs under overload unless Sieve sheds.
  *
- * <p>Usage: DemoServer [noshed|limiter|shed] [port]
+ * <p>Usage: DemoServer [noshed|limiter|shed] [port]; see {@link ServerConfig#fromEnv} for the
+ * SIEVE_* environment variables.
  * <ul>
  *   <li>noshed: no protection at all
  *   <li>limiter: only the partitioned adaptive concurrency limit
- *   <li>shed: shed curves on target and max latency utilization, plus the limiter as backstop
+ *   <li>shed: shed curves on target and max latency (and CPU if SIEVE_CPU_TARGET is set), plus
+ *       the limiter as backstop
  * </ul>
  */
-public final class DemoServer {
+public final class DemoServer implements AutoCloseable {
 
-    static final int WORKERS = 4;
-    static final int SERVICE_MS = 20;
-    static final int SLO_MS = 60;
-    static final int MAX_MS = 300;
+    private final HttpServer server;
+    private final ExecutorService executor;
+    private final CpuSignal cpu;
+    final Metrics metrics;
+    final ServerConfig config;
+
+    private DemoServer(HttpServer server, ExecutorService executor, CpuSignal cpu,
+            Metrics metrics, ServerConfig config) {
+        this.server = server;
+        this.executor = executor;
+        this.cpu = cpu;
+        this.metrics = metrics;
+        this.config = config;
+    }
 
     public static void main(String[] args) throws IOException {
         String mode = args.length < 1 ? "shed" : args[0];
         int port = args.length > 1 ? Integer.parseInt(args[1]) : 8080;
+        ServerConfig c = ServerConfig.fromEnv(mode, port);
+        start(c);
+        System.out.println("listening on " + port + " mode=" + mode + " backend=" + c.backend()
+                + " capacity~" + (c.workers() * 1000 / c.serviceMs()) + "rps");
+    }
 
-        Sieve sieve = switch (mode) {
+    static DemoServer start(ServerConfig c) throws IOException {
+        CpuSignal cpu = null;
+        Sieve sieve = switch (c.mode()) {
             case "noshed" -> null;
-            case "limiter" -> Sieve.builder(
-                    limiter()).build();
-            case "shed" -> Sieve.builder(
-                            limiter())
-                    // Target: shed lower tiers, never critical, as requests pass the SLO.
-                    .latencySlo(LatencySloSignal.of(Duration.ofMillis(SLO_MS)),
-                            ShedCurve.prioritized(0.10, 0.40))
-                    // Max: when requests approach timing out, shed everything.
-                    .latencySlo(LatencySloSignal.of(Duration.ofMillis(MAX_MS)),
-                            ShedCurve.unprioritized(0.10, 0.40))
-                    .build();
+            case "limiter" -> Sieve.builder(limiter(c)).build();
+            case "shed" -> {
+                Sieve.Builder b = Sieve.builder(limiter(c))
+                        // Target: shed lower tiers, never critical, as requests pass the SLO.
+                        .latencySlo(LatencySloSignal.of(Duration.ofMillis(c.targetMs())),
+                                ShedCurve.prioritized(c.targetLo(), c.targetHi()))
+                        // Max: when requests approach timing out, shed everything.
+                        .latencySlo(LatencySloSignal.of(Duration.ofMillis(c.maxMs())),
+                                ShedCurve.unprioritized(c.maxLo(), c.maxHi()));
+                if (c.cpuAutoscaleTarget() != null) {
+                    cpu = CpuSignal.system();
+                    b.utilization(cpu, ShedCurve.cpu(c.cpuAutoscaleTarget()));
+                }
+                yield b.build();
+            }
             default -> throw new IllegalArgumentException("mode: noshed|limiter|shed");
         };
-        Semaphore workers = new Semaphore(WORKERS);
-        Metrics metrics = new Metrics();
 
-        HttpServer server = HttpServer.create(new InetSocketAddress(port), 4096);
-        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-        server.createContext("/work", ex -> handle(ex, sieve, workers, metrics));
+        Semaphore workers = new Semaphore(c.workers());
+        Metrics metrics = new Metrics();
+        // CPU-burning handlers must not run on virtual threads: they would pin the carriers.
+        ExecutorService executor = c.backend().equals("cpu")
+                ? Executors.newCachedThreadPool() : Executors.newVirtualThreadPerTaskExecutor();
+
+        HttpServer server = HttpServer.create(new InetSocketAddress(c.port()), 4096);
+        server.setExecutor(executor);
+        server.createContext("/work", ex -> handle(ex, c, sieve, workers, metrics));
         server.createContext("/metrics", ex -> {
-            byte[] body = metrics.render().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] body = metrics.render().getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().add("Content-Type", "text/plain; version=0.0.4");
             ex.sendResponseHeaders(200, body.length);
             ex.getResponseBody().write(body);
             ex.close();
         });
         server.start();
-        System.out.println("listening on " + port + " mode=" + mode
-                + " capacity~" + (WORKERS * 1000 / SERVICE_MS) + "rps");
+        return new DemoServer(server, executor, cpu, metrics, c);
     }
 
-    /**
-     * Windowed Gradient2 sized for this backend (4 workers): start at 10, never below 4. Override
-     * with SIEVE_INITIAL_LIMIT, SIEVE_MIN_LIMIT, SIEVE_MAX_LIMIT; set SIEVE_WINDOWED=0 to use
-     * bare Gradient2 instead.
-     */
-    private static PriorityLimiter limiter() {
-        int initial = intEnv("SIEVE_INITIAL_LIMIT", 10);
-        int min = intEnv("SIEVE_MIN_LIMIT", 4);
-        int max = intEnv("SIEVE_MAX_LIMIT", 200);
-        boolean windowed = !"0".equals(System.getenv("SIEVE_WINDOWED"));
-        return windowed
+    @Override
+    public void close() {
+        server.stop(0);
+        executor.shutdownNow();
+        if (cpu != null) {
+            cpu.close();
+        }
+    }
+
+    private static PriorityLimiter limiter(ServerConfig c) {
+        return c.windowed()
                 ? PriorityLimiter.withWindowedGradient2(
-                        TierShares.criticalFirst(), initial, min, max)
-                : PriorityLimiter.withGradient2(TierShares.criticalFirst(), initial, min, max);
+                        TierShares.criticalFirst(), c.initialLimit(), c.minLimit(), c.maxLimit())
+                : PriorityLimiter.withGradient2(
+                        TierShares.criticalFirst(), c.initialLimit(), c.minLimit(), c.maxLimit());
     }
 
-    private static int intEnv(String name, int fallback) {
-        String v = System.getenv(name);
-        return v == null ? fallback : Integer.parseInt(v);
+    private static void work(ServerConfig c) throws InterruptedException {
+        if (c.backend().equals("cpu")) {
+            long end = System.nanoTime() + c.serviceMs() * 1_000_000L;
+            long x = 0;
+            while (System.nanoTime() < end) {
+                x += Long.numberOfTrailingZeros(x + 1);
+            }
+            if (x == 42) {
+                System.out.print(""); // keep the loop from being optimized away
+            }
+        } else {
+            Thread.sleep(c.serviceMs());
+        }
     }
 
-    private static void handle(
-            HttpExchange ex, Sieve sieve, Semaphore workers, Metrics metrics)
-            throws IOException {
+    private static void handle(HttpExchange ex, ServerConfig c, Sieve sieve, Semaphore workers,
+            Metrics metrics) throws IOException {
         Priority priority = Priority.parse(ex.getRequestHeaders().getFirst(Priority.HEADER))
                 .orElse(Priority.BEST_EFFORT);
 
@@ -118,7 +157,7 @@ public final class DemoServer {
         try {
             workers.acquire();
             try {
-                Thread.sleep(SERVICE_MS);
+                work(c);
             } finally {
                 workers.release();
             }
