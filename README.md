@@ -54,6 +54,22 @@ and the seconds per phase. Clients choose a tier with the `X-Sieve-Priority` hea
 (`critical`, `degraded`, `best_effort`, `bulk`); requests without it are treated as best-effort.
 Shed requests get a `503` with `Retry-After: 1`.
 
+## Results (demo backend, one machine)
+
+Spike profile (`scripts/spike.sh`): 100 rps baseline, ramp to 600 rps (6x), hold 30 s, recover.
+The demo backend serves about 200 rps, so the peak is about 3x its capacity. Success is the
+client view (a 503 or a timeout is a failure). Latency is the p99 of requests that were served,
+estimated from the server's histogram.
+
+| Mode | Critical | Degraded | Best-effort | Bulk | Critical p99 |
+|---|---|---|---|---|---|
+| No protection (1 run) | 20% | 20% | 20% | 20% | 5 s+ (timeouts) |
+| Shed curves + windowed limiter (3 runs) | 99.8-100% | 47-49% | 21-22% | 18-19% | 116-234 ms |
+
+Caveats: the backend is simulated (sleep-based, not CPU-bound), the load generator and server
+share one machine, and the baseline is a single run. The CPU signal has not been exercised
+against a CPU-bound workload yet.
+
 ## Known issues
 
 - **Cold start.** During JVM warm-up the first requests are slow, so the lower tiers are shed
