@@ -64,13 +64,16 @@ public final class DemoServer implements AutoCloseable {
             case "noshed" -> null;
             case "limiter" -> Sieve.builder(limiter(c)).build();
             case "shed" -> {
-                Sieve.Builder b = Sieve.builder(limiter(c))
-                        // Target: shed lower tiers, never critical, as requests pass the SLO.
-                        .latencySlo(LatencySloSignal.of(Duration.ofMillis(c.targetMs())),
-                                ShedCurve.prioritized(c.targetLo(), c.targetHi()))
-                        // Max: when requests approach timing out, shed everything.
-                        .latencySlo(LatencySloSignal.of(Duration.ofMillis(c.maxMs())),
-                                ShedCurve.unprioritized(c.maxLo(), c.maxHi()));
+                Sieve.Builder b = Sieve.builder(limiter(c));
+                // SIEVE_LATENCY=0 turns latency shedding off, to test the CPU signal alone.
+                if (!"0".equals(System.getenv("SIEVE_LATENCY"))) {
+                    // Target: shed lower tiers, never critical, as requests pass the SLO.
+                    b.latencySlo(LatencySloSignal.of(Duration.ofMillis(c.targetMs())),
+                            ShedCurve.prioritized(c.targetLo(), c.targetHi()));
+                    // Max: when requests approach timing out, shed everything.
+                    b.latencySlo(LatencySloSignal.of(Duration.ofMillis(c.maxMs())),
+                            ShedCurve.unprioritized(c.maxLo(), c.maxHi()));
+                }
                 if (c.cpuAutoscaleTarget() != null) {
                     cpu = CpuSignal.system();
                     b.utilization(cpu, ShedCurve.cpu(c.cpuAutoscaleTarget()));

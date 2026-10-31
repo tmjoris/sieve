@@ -2,6 +2,10 @@ package dev.sieve.demo;
 
 import dev.sieve.Priority;
 import java.net.http.HttpClient;
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -21,7 +25,12 @@ import java.util.concurrent.Executors;
  * held at the best known, keep the best, repeat. The winner should then be validated with the
  * full Gatling spike (scripts/spike.sh), as Netflix validates generated configs with load tests.
  *
- * <p>Usage: Tuner [sweeps=2] [spikeRps=600] [spikeSeconds=8] [out=results/tuned.env]
+ * <p>Each trial runs the server as a separate process (so the load generator does not steal its
+ * CPU), is repeated and averaged to tame noise, and a new best must beat the incumbent by a
+ * margin before it replaces it.
+ *
+ * <p>Run from the repository root after {@code ./gradlew :sieve-demo:installDist}.
+ * Usage: Tuner [sweeps=2] [spikeRps=600] [spikeSeconds=8] [repeats=2] [out=results/tuned.env]
  */
 public final class Tuner {
 
@@ -59,13 +68,19 @@ public final class Tuner {
 
     private record Trial(Point point, double score, Map<Priority, LoadProbe.TierResult> res) {}
 
+    /** A candidate must beat the incumbent by this many score points to replace it. */
+    private static final double MARGIN = 5.0;
+
+    private static final String LAUNCHER = "sieve-demo/build/install/sieve-demo/bin/sieve-demo";
+
     private static int port = 18080;
 
     public static void main(String[] args) throws Exception {
         int sweeps = args.length > 0 ? Integer.parseInt(args[0]) : 2;
         int rps = args.length > 1 ? Integer.parseInt(args[1]) : 600;
         int seconds = args.length > 2 ? Integer.parseInt(args[2]) : 8;
-        Path out = Path.of(args.length > 3 ? args[3] : "results/tuned.env");
+        int repeats = args.length > 3 ? Integer.parseInt(args[3]) : 2;
+        Path out = Path.of(args.length > 4 ? args[4] : "results/tuned.env");
 
         ServerConfig base = ServerConfig.defaults("shed", 0);
         HttpClient client = HttpClient.newBuilder()
@@ -74,10 +89,7 @@ public final class Tuner {
 
         Map<Point, Trial> seen = new HashMap<>();
         Point best = new Point(1, 2, 1, 1, 1); // the demo's hand-picked defaults
-        System.out.println("warm-up trial (discarded)");
-        evaluate(client, base, best, rps, seconds);
-
-        Trial bestTrial = record(seen, evaluate(client, base, best, rps, seconds), "default");
+        Trial bestTrial = record(seen, evaluate(client, base, best, rps, seconds, repeats), "default");
         for (int sweep = 1; sweep <= sweeps; sweep++) {
             boolean improved = false;
             for (int param = 0; param < Point.SIZES.length; param++) {
@@ -86,9 +98,9 @@ public final class Tuner {
                     if (seen.containsKey(candidate)) {
                         continue;
                     }
-                    Trial t = record(seen, evaluate(client, base, candidate, rps, seconds),
+                    Trial t = record(seen, evaluate(client, base, candidate, rps, seconds, repeats),
                             "sweep " + sweep + " " + Point.NAMES[param]);
-                    if (t.score() > bestTrial.score()) {
+                    if (t.score() > bestTrial.score() + MARGIN) {
                         bestTrial = t;
                         best = candidate;
                         improved = true;
@@ -120,14 +132,73 @@ public final class Tuner {
     }
 
     private static Trial evaluate(HttpClient client, ServerConfig base, Point p, int rps,
-            int seconds) throws Exception {
-        ServerConfig c = p.apply(base).withPort(port++);
-        try (DemoServer server = DemoServer.start(c)) {
-            Thread.sleep(300);
-            LoadProbe.run(client, c.port(), 100, 4, "none"); // warm up, discard
-            Map<Priority, LoadProbe.TierResult> res = LoadProbe.run(client, c.port(), rps, seconds, "none");
-            return new Trial(p, score(res), res);
+            int seconds, int repeats) throws Exception {
+        List<Map<Priority, LoadProbe.TierResult>> runs = new ArrayList<>();
+        for (int i = 0; i < repeats; i++) {
+            ServerConfig c = p.apply(base).withPort(port++);
+            runs.add(runOnce(client, c, rps, seconds));
         }
+        Map<Priority, LoadProbe.TierResult> mean = average(runs);
+        return new Trial(p, score(mean), mean);
+    }
+
+    /** Start the server as its own process, warm it up, spike it, stop it. */
+    private static Map<Priority, LoadProbe.TierResult> runOnce(HttpClient client, ServerConfig c,
+            int rps, int seconds) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(LAUNCHER, "shed", String.valueOf(c.port()));
+        pb.environment().put("SIEVE_TARGET_MS", String.valueOf(c.targetMs()));
+        pb.environment().put("SIEVE_TARGET_LO", String.valueOf(c.targetLo()));
+        pb.environment().put("SIEVE_TARGET_HI", String.valueOf(c.targetHi()));
+        pb.environment().put("SIEVE_MAX_MS", String.valueOf(c.maxMs()));
+        pb.environment().put("SIEVE_MAX_LO", String.valueOf(c.maxLo()));
+        pb.environment().put("SIEVE_MAX_HI", String.valueOf(c.maxHi()));
+        pb.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        Process proc = pb.start();
+        try {
+            awaitUp(client, c.port());
+            LoadProbe.run(client, c.port(), 100, 6, "none"); // warm up the JVM, discard
+            return LoadProbe.run(client, c.port(), rps, seconds, "none");
+        } finally {
+            proc.destroy();
+            proc.waitFor();
+        }
+    }
+
+    private static void awaitUp(HttpClient client, int port) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/metrics")).build();
+        for (int i = 0; i < 100; i++) {
+            try {
+                if (client.send(req, HttpResponse.BodyHandlers.discarding()).statusCode() == 200) {
+                    return;
+                }
+            } catch (IOException e) {
+                Thread.sleep(100);
+            }
+        }
+        throw new IllegalStateException("server on port " + port + " did not start");
+    }
+
+    /** Mean of each tier's numbers across runs. */
+    private static Map<Priority, LoadProbe.TierResult> average(
+            List<Map<Priority, LoadProbe.TierResult>> runs) {
+        Map<Priority, LoadProbe.TierResult> out = new java.util.EnumMap<>(Priority.class);
+        for (Priority p : Priority.values()) {
+            long sent = 0;
+            long ok = 0;
+            long attempts = 0;
+            double p50 = 0;
+            double p99 = 0;
+            for (var r : runs) {
+                LoadProbe.TierResult t = r.get(p);
+                sent += t.sent();
+                ok += t.ok();
+                attempts += t.attempts();
+                p50 += t.p50Ms();
+                p99 += t.p99Ms();
+            }
+            out.put(p, new LoadProbe.TierResult(sent, ok, attempts, p50 / runs.size(), p99 / runs.size()));
+        }
+        return out;
     }
 
     /**

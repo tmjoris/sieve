@@ -5,6 +5,76 @@ Prioritized load shedding for Java 21 services, built on Netflix's
 
 Work in progress. Numbers will be added here only once they are measured.
 
+## Modules
+
+| Module | What it is |
+|---|---|
+| `sieve-core` | The library: priorities, shed curves, utilization signals, the partitioned limiter, `Sieve`, and the client `RetryPolicy`. No framework dependencies. |
+| `sieve-spring` | Servlet filter and Spring Boot auto-configuration. |
+| `sieve-grpc` | gRPC server interceptor. |
+| `sieve-demo` | Demo backend with a fixed capacity, a load probe, and the auto-tuner. |
+| `sieve-harness` | Gatling simulation that replays a traffic spike. |
+| `monitoring/` | Prometheus and Grafana (docker compose) with a provisioned dashboard. |
+
+## Using it
+
+### Plain Java
+
+```java
+Sieve sieve = Sieve.builder(PriorityLimiter.withWindowedGradient2(
+                TierShares.criticalFirst(), /*initial*/ 10, /*min*/ 4, /*max*/ 200))
+        // lower tiers shed as requests pass the 60 ms target, never critical
+        .latencySlo(LatencySloSignal.of(Duration.ofMillis(60)), ShedCurve.prioritized(0.10, 0.40))
+        // everything shed as requests approach the 300 ms timeout
+        .latencySlo(LatencySloSignal.of(Duration.ofMillis(300)), ShedCurve.unprioritized(0.10, 0.40))
+        // CPU-bound service that autoscales at 50% CPU
+        .utilization(CpuSignal.system(), ShedCurve.cpu(0.50))
+        .build();
+
+switch (sieve.admit(priority)) {
+    case Admission.Shed s -> respond503(s.retryAfter());
+    case Admission.Admitted a -> {
+        try { handle(); a.permit().success(); }
+        catch (Exception e) { a.permit().dropped(); throw e; }
+    }
+}
+```
+
+### Spring Boot
+
+Add `sieve-spring` and configure it; the filter runs before everything else and answers `503`
+with `Retry-After` for shed requests.
+
+```yaml
+sieve:
+  initial-limit: 10
+  min-limit: 4
+  latency-target: 60ms
+  latency-max: 300ms
+  cpu-autoscale-target: 0.5     # optional
+  default-priority: best_effort
+```
+
+Clients send `X-Sieve-Priority: critical|degraded|best_effort|bulk`. Inside a request,
+`SievePriorityContext.downgrade(...)` lowers the priority for outgoing calls; it can never raise it.
+
+### gRPC
+
+```java
+ServerInterceptors.intercept(service, new SieveServerInterceptor(sieve, Priority.BEST_EFFORT));
+```
+
+Shed calls close with `UNAVAILABLE` and a `retry-after` trailer. The priority comes from the
+`x-sieve-priority` metadata key.
+
+### Clients: retry budget
+
+`RetryPolicy` is the client half. It retries at most twice, with full-jitter exponential backoff,
+never sooner than the server's `Retry-After`, and gives up when that hint is longer than it is
+willing to wait. A budget tracks retries per first attempt; as the ratio climbs, low-priority
+retries are dropped first. Bulk and best-effort are told to stay away for 10 s and 5 s, so they
+are not retried at all.
+
 ## Requirements
 
 - JDK 21
