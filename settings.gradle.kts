@@ -1,3 +1,3 @@
 rootProject.name = "sieve"
 
-include("sieve-core", "sieve-demo")
+include("sieve-core", "sieve-demo", "sieve-harness")
