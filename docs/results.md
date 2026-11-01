@@ -215,16 +215,29 @@ histogram's bucket boundary, not a measurement of exactly 100 ms.
 
 ### Auto-tuner (`sieve-demo`, `Tuner`)
 
-Coordinate descent over the shedding thresholds, each trial a real server process under a real
-spike, averaged over two runs. The score requires critical success of at least 99% and p99 under
-400 ms, then rewards the weighted goodput of the other tiers. Two search runs agreed on the
-shape of the landscape:
+Coordinate descent over the graded thresholds (degraded 0.95, 0.85 or 0.75; best-effort 0.80 to
+0.50; bulk 0.60 to 0.30) and the critical floor (0, 8, 16 or 32). Each candidate is a real server
+process in `limiter` mode under a constant overload, averaged over two runs, on a GitHub runner
+(`tune.yml`). A candidate is rejected unless critical stays at 99% or better with p99 under 400 ms;
+among the rest the score rewards the lower tiers' goodput, with a small penalty for tail latency and
+for large floors.
 
-- A 40 ms latency target sheds too much (best-effort success falls to 2%).
-- A 90 ms target or looser admits more lower-tier traffic (17-20% each) but critical drops to
-  about 98% and the trial is rejected.
-- Around 60 ms the score is a plateau, so the tuned configuration (+8% score) did not validate as
-  better than the defaults in the full spike above.
+- At a 10x peak (1,000 requests per second) nothing was feasible: critical got 78 to 97% in every
+  candidate, because critical traffic alone fills the backend there. The tuner needs a peak where a
+  feasible region exists.
+- At an 8x peak (800 requests per second) the default thresholds without a floor gave critical 93.8%.
+  A floor of 8, 16 or 32 made it feasible (99.6%, 100%, 100%). The winner was the default thresholds
+  with a floor of 8, the smallest floor that works. Threshold changes moved the score by at most 3
+  points against a 5 point margin, so they are within noise at this load.
+- The winner is the configuration the 10x interleaved runs above had already validated (graded plus
+  floor 8: 97.0% against 90.5% for graded alone), so the tuner agrees with that evidence and does not
+  improve on it.
+- Its stimulus (an instant, constant overload) is harsher than the Gatling ramp, so absolute numbers
+  differ: lower tiers got about 1 to 17% there. Use it to find which knob matters, then validate with
+  `benchmark.yml`.
+
+Before this, an earlier version searched the latency curve thresholds, found a plateau and no
+configuration better than the defaults, and was retargeted. Logs: `docs/evidence/tuner-2026-11-01.tar.gz`.
 
 ### Controls
 
@@ -255,6 +268,7 @@ Checks run to see which results hold up, each against the same spike.
 | Short signal window (1 s) | Under a 400 ms stall critical fell to 90.3% | Keep 5 s |
 | Probe fraction to break the low traffic latch | Not run: the latch is bounded by the window | Rejected on reasoning |
 | Tuned curve thresholds | Score +8% in the tuner, not separable from defaults | Defaults kept |
+| Tuner over graded thresholds and floor | At 8x the floor was what made critical feasible; thresholds within noise | Kept; it finds the dominant knob |
 | Critical `Retry-After` of 1 s | Retried critical p99 1.2 s | Changed to 0 with client jitter: 0.3 s |
 | System wide CPU signal | Critical 79 to 96% depending on what else ran on the machine | `CpuSignal.process()` added: 100% |
 | Lock held on every signal read | 1.9M admits/s on 4 threads | Lock free and cached: 3.9M |

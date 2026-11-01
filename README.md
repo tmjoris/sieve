@@ -177,8 +177,8 @@ tried and rejected.
   (critical is not). The demo can warm up before serving (`SIEVE_WARMUP_S`), which cut that from
   12 to 23% of lower-tier requests to about 2%.
 - The CPU curve starts shedding critical requests at 80% CPU by design.
-- The threshold tuner searches the curve thresholds, which turned out to matter little; the graded
-  thresholds are the knob that matters and are not tuned automatically yet.
+- The `Tuner` (run through the `Tune` workflow) searches the graded thresholds and the floor. On this
+  backend it found that the floor is what matters and kept the default thresholds.
 - There is no Spring Boot demo application; the Spring module is covered by unit and end to end
   tests, and the benchmarks use a small JDK HTTP server.
 
