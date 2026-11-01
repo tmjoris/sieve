@@ -13,6 +13,36 @@ a Gatling load harness with Prometheus and Grafana, and a threshold tuner. Every
 measured only against a simulated backend on one machine; read "Results" and "Limitations" before
 quoting a number.
 
+## At a glance
+
+A 6x traffic spike (100 to 600 requests per second) against a simulated backend that serves about
+200 per second, three runs per mode:
+
+| | Critical success | Degraded / best-effort / bulk |
+|---|---|---|
+| No protection | 20% | 20 / 20 / 20% |
+| Adaptive limiter only | 100% | 37 / 36 / 40%, no order |
+| Sieve (shed curves + limiter) | 99.4% (98.4 to 100) | 46 / 22 / 19%, in priority order |
+
+![Offered load and goodput under the spike, with Sieve](docs/grafana-shed.png)
+
+- Under overload, critical requests stay available and the lower tiers are shed in order.
+- The adaptive limiter alone already protects critical traffic; the shed curves add the ordering
+  among the lower tiers.
+- Client retries matter: two immediate retries cut critical success to 90% and nearly tripled the
+  load from the lower tiers, while Sieve's retry budget kept it at 99.4%.
+- This is one machine and a simulated backend, and the machine was noisy for part of the work.
+  Details and the corrections I made along the way are under [Results](#results) and
+  [Limitations](#limitations).
+
+## Quick start
+
+```bash
+git clone https://github.com/tmjoris/sieve.git && cd sieve
+./gradlew build                 # needs JDK 21
+scripts/spike.sh shed           # Gatling spike against the demo server, per tier results
+```
+
 ## Modules
 
 | Module | What it is |
@@ -389,3 +419,7 @@ The benchmarking approach (paired comparisons, archived raw evidence, stating wh
 not establish) follows the submissions to
 [twelve-dollar-server-challenge](https://github.com/arjaythedev/twelve-dollar-server-challenge),
 in particular pull request 82.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
