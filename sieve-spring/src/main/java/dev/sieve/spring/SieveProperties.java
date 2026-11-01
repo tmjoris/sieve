@@ -23,6 +23,12 @@ public class SieveProperties {
     private Duration latencyMax;
     /** If set, shed on system CPU. Value is the CPU fraction the autoscaler targets (0.5). */
     private Double cpuAutoscaleTarget;
+    /**
+     * "system" (default) reads whole-machine CPU, the same signal most autoscalers use, so shedding
+     * lines up with scaling. "process" reads only this JVM, which is right on a shared machine
+     * where other processes (a load generator, a noisy neighbour) would otherwise trigger shedding.
+     */
+    private String cpuScope = "system";
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -42,6 +48,8 @@ public class SieveProperties {
     public void setLatencyTarget(Duration latencyTarget) { this.latencyTarget = latencyTarget; }
     public Duration getLatencyMax() { return latencyMax; }
     public void setLatencyMax(Duration latencyMax) { this.latencyMax = latencyMax; }
+    public String getCpuScope() { return cpuScope; }
+    public void setCpuScope(String cpuScope) { this.cpuScope = cpuScope; }
     public Double getCpuAutoscaleTarget() { return cpuAutoscaleTarget; }
     public void setCpuAutoscaleTarget(Double cpuAutoscaleTarget) { this.cpuAutoscaleTarget = cpuAutoscaleTarget; }
 }

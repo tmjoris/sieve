@@ -40,7 +40,9 @@ public class SieveAutoConfiguration {
             b.latencySlo(LatencySloSignal.of(p.getLatencyMax()), ShedCurve.unprioritized(0.10, 0.40));
         }
         if (p.getCpuAutoscaleTarget() != null) {
-            b.utilization(CpuSignal.system(), ShedCurve.cpu(p.getCpuAutoscaleTarget()));
+            CpuSignal cpu = "process".equalsIgnoreCase(p.getCpuScope())
+                    ? CpuSignal.process() : CpuSignal.system();
+            b.utilization(cpu, ShedCurve.cpu(p.getCpuAutoscaleTarget()));
         }
         return b.build();
     }

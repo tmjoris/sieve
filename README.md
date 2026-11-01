@@ -148,9 +148,10 @@ What this shows:
 
 - Without protection, every tier fails equally and latency runs into the client timeout.
 - The windowed adaptive limiter alone already keeps critical traffic available on this backend.
-- The shed curves add two things: about 3x lower median latency for critical requests, and a real
-  priority order among the lower tiers (degraded is served more than best-effort, more than bulk).
-  The limiter alone treats those three the same.
+- The shed curves add a real priority order among the lower tiers: degraded is served more than
+  best-effort, more than bulk. The limiter alone treats those three the same.
+- In these unpinned runs the curves also gave lower critical median latency (23 ms against 68 ms),
+  but that gap did not survive a fairer comparison; see "Controls" below.
 - The tuned thresholds are not distinguishable from the hand-picked defaults on goodput.
 
 ### Dashboards
@@ -178,14 +179,17 @@ is calls sent to the server per original request. Three runs each.
 
 | Client retries | Critical success | Critical p99 | Degraded success | Load, degraded tier |
 |---|---|---|---|---|
-| None | 98.4% | 196 ms | 34.5% | 1.00x |
-| Naive: 2 immediate retries | 93.7% (90.0-97.4) | 1.6 s | 18.8% | 2.77x |
-| `RetryPolicy` (budget) | 100.0% (99.9-100) | 1.2 s | 35.0% | 1.00x |
+| None | 97.6% | 251 ms | 35.0% | 1.00x |
+| Naive: 2 immediate retries | 90.0% (87.5-93.6) | 2.7 s | 11.5% | 2.87x |
+| `RetryPolicy` (budget) | 99.4% (99.2-99.7) | 302 ms | 33.6% | 1.00x |
 
 Naive retries make the overload worse: they nearly triple the load from the lower tiers and cost
-critical traffic availability. The retry budget adds only 3% load, because the lower tiers'
-`Retry-After` hints (2-10 s) exceed the 1 s it is willing to wait. The cost is that a retried
-critical request waits out its 1 s `Retry-After`, which is why its p99 is about 1.2 s.
+critical traffic availability. The retry budget adds about 6% load overall, because the lower
+tiers' `Retry-After` hints (2-10 s) exceed the 1 s it is willing to wait.
+
+Shed critical requests are told `Retry-After: 0` and the client's full-jitter backoff spreads
+them out. An earlier version told them to wait 1 s, which put the critical p99 at about 1.2 s; the
+change cut it to 0.3 s.
 
 Against a server with no shedding, nothing helps (about 22% success whichever way clients retry),
 but naive retries still send 2.5x the calls.
@@ -193,20 +197,22 @@ but naive retries still send 2.5x the calls.
 ### CPU-bound backend
 
 The demo can burn CPU instead of sleeping (`SIEVE_BACKEND=cpu`). 4 spinning workers serve about
-200 rps; load goes from 50 to 300 rps. Two rounds per mode, system CPU as the signal with a 50%
-autoscaling target (non-critical shedding from 60% CPU, critical from 80%).
+200 rps; load goes from 50 to 300 rps. CPU is the only shedding signal, with a 50% autoscaling
+target (non-critical shedding from 60% CPU, critical from 80%). Two rounds per mode.
 
 | Mode | Critical success | Critical p99 | Degraded / best-effort / bulk success |
 |---|---|---|---|
 | No protection | 41% | timeouts (5 s) | 41 / 41 / 41% |
-| CPU signal only | 95.5-96.2% | 98-139 ms | 60 / 40 / 24% |
-| CPU + latency signals | 95.8-96.3% | 99-100 ms | 61 / 40 / 23% |
+| System-wide CPU (earlier batch) | 95.5-96.2% | 98-139 ms | 60 / 40 / 24% |
+| System-wide CPU (later batch) | 78.6-89.2% | 68-79 ms | 44 / 26 / 16% |
+| Process CPU (`CpuSignal.process()`) | 100% | 105 ms | 72.5 / 64.7 / 57.0% |
 
-The CPU signal alone orders the tiers and keeps latency low. Critical traffic is not fully
-protected (about 96%): at saturation the CPU sits above 80%, where the curve starts shedding
-critical requests, and the machine-wide reading includes the load generator. This matches the
-design in Netflix's talk, which also notes that CPU saturates and stops reflecting load once a
-service is shedding.
+System-wide CPU includes the load generator and anything else on the machine, so the same
+configuration gave 96% critical in one batch and 84% in another. Reading only this process's CPU
+removed that: critical was fully protected and the lower tiers kept much more of their traffic,
+because they were no longer shed for CPU the server did not use. On a shared machine, use
+`CpuSignal.process()`; where the signal must line up with an autoscaler that scales on instance
+CPU, use `system()` (Spring: `sieve.cpu-scope`).
 
 ### Auto-tuner (`sieve-demo`, `Tuner`)
 
@@ -221,13 +227,32 @@ shape of the landscape:
 - Around 60 ms the score is a plateau, so the tuned configuration (+8% score) did not validate as
   better than the defaults in the full spike above.
 
+### Controls
+
+Checks run to see which results hold up, each against the same spike.
+
+- **Core pinning.** Server on cores 0-1 and Gatling on 2-3 (`SIEVE_PIN=1`). With both modes
+  pinned, critical p50 is 51-55 ms with shedding against 57-58 ms limiter-only, so the 3x latency
+  gap seen unpinned was the server having spare CPU, not the curves. Both keep critical at 100%.
+  What stays: the tier ordering (degraded 57% against 37% limiter-only, bulk 21% against 40%).
+  Pinning also tightened the tail: shed p99 was 84-97 ms against 151-239 ms unpinned.
+- **Limiter limits.** The library's own windowed Gradient2 limits (initial 20, minimum 20) against
+  the tight 10 / 4 used for this 4-worker backend: critical availability is the same (99.2% against
+  99.9%), limiter-only critical p50 is 100 ms against 60 ms, and degraded goodput under shedding is
+  36% against 48%. The defaults are acceptable; sizing the floor to the service buys latency and
+  lower-tier goodput, not critical availability.
+- **Hot path.** `Sieve.admit()` with two latency signals, 4 threads: about 1.9M admits/s before
+  the signals became lock-free and cached, about 3.9M after (one thread: about 1.0M to 2.1M). That
+  is about 0.5 microseconds per request, and it was never the bottleneck at the 600 rps used here.
+
 ### Limitations
 
 - The backend is simulated and the machine is shared with the load generator.
-- Latency figures are sensitive to machine load: two further shed runs taken while the Prometheus
-  and Grafana containers were running had critical p50 of 62-65 ms (against 21-24 ms), with
-  similar availability.
-- Per-tier p99 comes from histogram buckets and is coarse.
+- Latency figures depend on how much CPU the server has to itself (see "Controls"): unpinned runs
+  and runs with the Prometheus and Grafana containers up differ by 2-3x in critical p50. Compare
+  modes only within the same setup.
+- Per-tier p99 comes from histogram buckets (1.25x steps in the latest version, coarser in the
+  runs in the first tables).
 - The limiter's tight floor and starting limit (4 and 10) are tuned to this 4-worker backend and
   are not general defaults. The library's own defaults (20 and 20) are looser.
 

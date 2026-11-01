@@ -59,4 +59,14 @@ class SieveAutoConfigurationTest {
         runner.run(ctx -> assertTrue(
                 ctx.getBean("sieveFilter", FilterRegistrationBean.class).getFilter() instanceof Filter));
     }
+
+    @Test
+    void cpuScopeDefaultsToSystemAndCanBeProcess() {
+        runner.run(ctx -> assertEquals("system", ctx.getBean(SieveProperties.class).getCpuScope()));
+        runner.withPropertyValues("sieve.cpu-scope=process", "sieve.cpu-autoscale-target=0.5")
+                .run(ctx -> {
+                    assertEquals("process", ctx.getBean(SieveProperties.class).getCpuScope());
+                    assertTrue(ctx.getBean(Sieve.class) != null);
+                });
+    }
 }
