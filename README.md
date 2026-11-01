@@ -3,7 +3,15 @@
 Prioritized load shedding for Java 21 services, built on Netflix's
 [`concurrency-limits`](https://github.com/Netflix/concurrency-limits).
 
-Work in progress. Numbers will be added here only once they are measured.
+Sieve keeps a Java service useful when it is overloaded. Each request carries a priority, and
+under load the lowest priorities are shed first, so the requests users care about keep working.
+It follows the design Netflix described for service level prioritized load shedding and builds on
+their open source adaptive concurrency limits.
+
+What is here: the core library, a Spring Boot filter, a gRPC interceptor, a client retry policy,
+a Gatling load harness with Prometheus and Grafana, and a threshold tuner. Everything has been
+measured only against a simulated backend on one machine; read "Results" and "Limitations" before
+quoting a number.
 
 ## Modules
 
@@ -15,6 +23,8 @@ Work in progress. Numbers will be added here only once they are measured.
 | `sieve-demo` | Demo backend with a fixed capacity, a load probe, and the auto-tuner. |
 | `sieve-harness` | Gatling simulation that replays a traffic spike. |
 | `monitoring/` | Prometheus and Grafana (docker compose) with a provisioned dashboard. |
+| `scripts/` | `spike.sh`, `retry-storm.sh`, `overload-search.sh`, `archive-evidence.sh`, and the summarizer. |
+| `docs/` | Dashboard screenshots and archived raw results with an environment manifest. |
 
 ## Using it
 
@@ -27,7 +37,7 @@ Sieve sieve = Sieve.builder(PriorityLimiter.withWindowedGradient2(
         .latencySlo(LatencySloSignal.of(Duration.ofMillis(60)), ShedCurve.prioritized(0.10, 0.40))
         // everything shed as requests approach the 300 ms timeout
         .latencySlo(LatencySloSignal.of(Duration.ofMillis(300)), ShedCurve.unprioritized(0.10, 0.40))
-        // CPU-bound service that autoscales at 50% CPU
+        // CPU-bound service that autoscales at 50% CPU (CpuSignal.process() reads only this JVM)
         .utilization(CpuSignal.system(), ShedCurve.cpu(0.50))
         .build();
 
@@ -51,7 +61,9 @@ sieve:
   min-limit: 4
   latency-target: 60ms
   latency-max: 300ms
+  windowed: true                # wrap Gradient2 in WindowedLimit (default)
   cpu-autoscale-target: 0.5     # optional
+  cpu-scope: system             # or process; see "CPU-bound backend" below
   default-priority: best_effort
 ```
 
@@ -72,13 +84,15 @@ Shed calls close with `UNAVAILABLE` and a `retry-after` trailer. The priority co
 `RetryPolicy` is the client half. It retries at most twice, with full-jitter exponential backoff,
 never sooner than the server's `Retry-After`, and gives up when that hint is longer than it is
 willing to wait. A budget tracks retries per first attempt; as the ratio climbs, low-priority
-retries are dropped first. Bulk and best-effort are told to stay away for 10 s and 5 s, so they
-are not retried at all.
+retries are dropped first. The server's hints do part of the work: critical requests are told
+`Retry-After: 0` and retry at once with jitter, while degraded, best-effort and bulk are told 2 s,
+5 s and 10 s, which is longer than the client's 1 s limit, so they are not retried.
 
 ## Requirements
 
-- JDK 21
-- Nothing else to install. The Gradle wrapper downloads Gradle on first use.
+- JDK 21. The Gradle wrapper downloads Gradle on first use.
+- To run the harness scripts: Python 3 (for the summaries) and `curl`. `taskset` is optional
+  (core pinning). Docker is only needed for the Prometheus and Grafana stack.
 
 ## Build and test
 
@@ -120,22 +134,51 @@ kill %1
 ```
 
 `LoadProbe` arguments are the port, a comma-separated list of request rates (one phase each),
-and the seconds per phase. Clients choose a tier with the `X-Sieve-Priority` header
-(`critical`, `degraded`, `best_effort`, `bulk`); requests without it are treated as best-effort.
-Shed requests get a `503` with `Retry-After: 1`.
+the seconds per phase, and optionally a client retry mode: `none` (default), `naive` or `budget`.
+Clients choose a tier with the `X-Sieve-Priority` header (`critical`, `degraded`, `best_effort`,
+`bulk`); requests without it are treated as best-effort. Shed requests get a `503` with
+`Retry-After` of 0, 2, 5 or 10 seconds for critical, degraded, best-effort and bulk.
+
+The demo server reads `SIEVE_*` environment variables: `SIEVE_BACKEND=cpu` burns CPU instead of
+sleeping, `SIEVE_WORKERS`, `SIEVE_SERVICE_MS`, `SIEVE_CPU_TARGET` (adds the CPU signal),
+`SIEVE_CPU_SCOPE=process|system`, `SIEVE_LATENCY=0` (turn latency shedding off), the threshold
+settings `SIEVE_TARGET_MS`, `SIEVE_TARGET_LO`, `SIEVE_TARGET_HI`, `SIEVE_MAX_MS`, `SIEVE_MAX_LO`,
+`SIEVE_MAX_HI`, and the limiter settings `SIEVE_INITIAL_LIMIT`, `SIEVE_MIN_LIMIT`,
+`SIEVE_MAX_LIMIT`, `SIEVE_WINDOWED=0`.
+
+## Run the harness
+
+```bash
+scripts/spike.sh noshed|limiter|shed     # Gatling spike, per tier results and sanity checks
+scripts/retry-storm.sh shed 3            # none / naive / budget client retries, 3 runs each
+scripts/overload-search.sh shed 6 8 10   # same spike at larger peak multiples
+java -cp "sieve-demo/build/install/sieve-demo/lib/*" dev.sieve.demo.Tuner   # threshold tuner
+scripts/archive-evidence.sh my-label     # bundle raw results with an environment manifest
+(cd monitoring && docker compose up -d)  # Prometheus :9090 and Grafana :3000
+```
+
+`spike.sh` honours `SIEVE_PIN=1` (server on cores 0 and 1, Gatling on 2 and 3),
+`SIEVE_SERVER_JVM` (JVM flags for the server only), `SIEVE_PEAK_MULT` and `SIEVE_BASE_RPS`. Before
+each run it records the host's load average and flags the run as noisy if the machine is busy
+(`SIEVE_MAX_LOAD`, default 1.5; it waits up to `SIEVE_WAIT_QUIET` seconds, default 90, first).
+After each run it checks that critical was never served less than another tier, and that every
+arrived request is accounted for as served or shed.
 
 ## Results
 
 Everything below was measured on one 4-core machine against the demo backend, with the load
 generator on the same machine. The numbers show how the pieces behave relative to each other;
-they are not claims about production capacity.
+they are not claims about production capacity. Read "Limitations" for how noisy that machine was.
 
 ### 6x spike (Gatling, `scripts/spike.sh`)
 
 100 rps baseline, ramp to 600 rps, hold 30 s, recover. The sleep-based backend serves about
 200 rps, so the peak is about 3x its capacity. Success is the client view (a 503 or a timeout is a
 failure). Latency is for served requests, estimated from the server's histogram. Three rounds per
-mode, interleaved to cancel drift.
+mode, interleaved to cancel drift. These runs predate the lock free signals and the critical
+`Retry-After` change listed under "Decisions". Two later batches of the shed mode gave critical
+99.2% to 100%, but three runs taken while the machine was heavily loaded gave 80.7%, 99.1% and
+90.4% (see "Limitations").
 
 | Mode | Critical success | Critical p50 / p99 | Degraded / best-effort / bulk success |
 |---|---|---|---|
@@ -301,11 +344,18 @@ prints a check that critical was never served less than another tier.
   traffic, a burst of slow requests can keep the signal high until its 5 s window expires,
   because shed requests produce no fresh samples.
 - Results vary between runs; one run proves little.
+- The latency thresholds may react to a noisy host by shedding more than they should, critical
+  traffic included. Seen once, under uncontrolled load; not tested.
+- The CPU curve starts shedding critical requests at 80% CPU by design, so a service that sits
+  above that for long periods loses some critical traffic.
+- The tuner found no configuration better than the defaults on this backend.
+- There is no Spring Boot demo application; the Spring module is covered by unit and end to end
+  tests, and the benchmarks use a small JDK HTTP server.
 
 ## Design
 
 Requests carry one of four priorities: `CRITICAL`, `DEGRADED`, `BEST_EFFORT`, `BULK`.
-Two mechanisms work together:
+Three mechanisms work together:
 
 1. **Utilization-based shedding.** A per-tier shed probability, driven by CPU or by the
    fraction of requests slower than a latency SLO. Shedding starts above the autoscaling
@@ -317,8 +367,13 @@ Two mechanisms work together:
 3. **Partitioned adaptive concurrency limit** (Gradient2) as a backstop. A tier is only held
    to its share once the global limit is full; below that, tiers borrow freely.
 
-Clients get a 503 with `Retry-After` and a per-priority retry budget so shedding does not
-turn into a retry storm.
+Latency signals record lock free and publish a cached value, so a request pays about a clock read
+and a volatile read to find out how loaded the service is, in the spirit of Netflix's out of band
+utilization files. In the Spring module a priority can be downgraded inside a service but never
+upgraded.
+
+Clients get a 503 (or gRPC `UNAVAILABLE`) with `Retry-After` and a per-priority retry budget so
+shedding does not turn into a retry storm.
 
 ## References
 
@@ -329,3 +384,8 @@ Netflix engineering posts and talk this is based on:
 - [Enhancing Netflix Reliability with Service-Level Prioritized Load Shedding](https://netflixtechblog.com/enhancing-netflix-reliability-with-service-level-prioritized-load-shedding-e735e6ce8f7d) (2024): the four priority buckets, CPU and latency utilization, the 6x experiment.
 - [How Netflix handles sudden load spikes in the cloud](https://reinvent.awsevents.com/content/dam/reinvent/2024/slides/nfx/NFX301_How-Netflix-handles-sudden-load-spikes-in-the-cloud.pdf) (re:Invent 2024 slides): target versus max utilization, success and failure buffers, retry settings.
 - [Enhancing Reliability Using Service-Level Prioritized Load Shedding at Netflix](https://infoq.com/presentations/service-level-prioritized-load-shedding) (QCon SF 2025): shed-probability functions, success and failure buffers, auto-tuning, prioritized retry budget.
+
+The benchmarking approach (paired comparisons, archived raw evidence, stating what a result does
+not establish) follows the submissions to
+[twelve-dollar-server-challenge](https://github.com/arjaythedev/twelve-dollar-server-challenge),
+in particular pull request 82.
