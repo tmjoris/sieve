@@ -18,24 +18,24 @@ quoting a number.
 ## At a glance
 
 A 6x traffic spike (100 to 600 requests per second) against a simulated backend that serves about
-200 per second, three runs per mode:
+200 per second. Three rounds per mode on a GitHub Actions runner (4 vCPU, idle before each run),
+current code, clean tree:
 
 | | Critical success | Degraded / best-effort / bulk |
 |---|---|---|
 | No protection | 20% | 20 / 20 / 20% |
-| Adaptive limiter only | 100% | 37 / 36 / 40%, no order |
-| Sieve (shed curves + limiter) | 99.4% (98.4 to 100) | 46 / 22 / 19%, in priority order |
+| Adaptive limiter only | 100% | 40 / 35 / 39%, no order |
+| Sieve (shed curves + limiter) | 100% | 45 / 34 / 31%, in priority order |
 
 ![Offered load and goodput under the spike, with Sieve](docs/grafana-shed.png)
 
 - Under overload, critical requests stay available and the lower tiers are shed in order.
 - The adaptive limiter alone already protects critical traffic; the shed curves add the ordering
-  among the lower tiers.
+  among the lower tiers. On my laptop the gap was wider (46 / 22 / 18%).
 - Client retries matter: two immediate retries cut critical success to 90% and nearly tripled the
   load from the lower tiers, while Sieve's retry budget kept it at 99.4%.
-- This is one machine and a simulated backend, and the machine was noisy for part of the work.
-  Details and the corrections I made along the way are under [Results](#results) and
-  [Limitations](#limitations).
+- This is a simulated backend. Details, the corrections I made along the way, and the runs that
+  did not behave are in [Results](#results) and [docs/results.md](docs/results.md).
 
 ## Quick start
 
@@ -128,13 +128,18 @@ retries are dropped first. The server's hints do part of the work: critical requ
 ## Results
 
 The 6x spike (100 to 600 requests per second, backend capacity about 200), three rounds per mode,
-interleaved. Success is the client view; a 503 or a timeout counts as a failure.
+on a GitHub Actions runner. Success is the client view; a 503 or a timeout counts as a failure.
+The workflow is [`benchmark.yml`](.github/workflows/benchmark.yml); the raw results are in
+`docs/evidence/`.
 
 | Mode | Critical success | Critical p50 / p99 | Degraded / best-effort / bulk |
 |---|---|---|---|
-| No protection | 20.4% | timeouts (5 s) | 20.5 / 20.4 / 20.4% |
-| Limiter only (windowed Gradient2) | 100% (3/3) | 68 / 99 ms | 36.5 / 35.6 / 39.5%, no order |
-| Shed curves + limiter | 99.4% (98.4 to 100) | 23 / 151 to 239 ms | 46.2 / 21.6 / 18.5%, ordered |
+| No protection | 20.2% | timeouts | 20.2 / 20.2 / 20.2% |
+| Limiter only (windowed Gradient2) | 100% (3/3) | 52 / 70 to 81 ms | 39.6 / 35.2 / 39.0%, no order |
+| Shed curves + limiter | 100% (3/3) | 52 to 57 / 70 to 81 ms | 45.1 / 34.4 / 31.0%, ordered |
+
+On my own machine, the same spike gave critical 98.4 to 100% for the shed mode and a wider tier
+ordering (46 / 22 / 18%).
 
 And a retry storm (a sudden 600 rps for 10 s), three runs each:
 

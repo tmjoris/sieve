@@ -9,6 +9,27 @@ Everything below was measured on one 4-core machine against the demo backend, wi
 generator on the same machine. The numbers show how the pieces behave relative to each other;
 they are not claims about production capacity. Read "Limitations" for how noisy that machine was.
 
+### Clean hardware: GitHub Actions
+
+`benchmark.yml` runs the spike on a GitHub runner (4 vCPU, a shared VM that was 0 to 2% busy before
+every run) and archives the raw results with a manifest (`docs/evidence/ci-*.tar.gz`, clean working
+tree). The runner CPU varies between runs: an AMD EPYC 7763 for the first run, an EPYC 9V45 for the
+three-round run below. Both sanity checks (critical never served less than another tier, every
+request accounted for) passed in every run.
+
+| Run | Mode | Critical success | Critical p99 | Degraded / best-effort / bulk |
+|---|---|---|---|---|
+| 3 rounds, unpinned (`ci-41264607016`) | Limiter only | 100% (3/3) | 70 to 81 ms | 39.6 / 35.2 / 39.0% |
+| | Shed + limiter | 100% (3/3) | 70 to 81 ms | 45.1 / 34.4 / 31.0% |
+| 3 rounds, pinned (`ci-41264570959`) | Limiter only | 100% (3/3) | 69 to 83 ms | 38.5 / 35.5 / 39.6% |
+| | Shed + limiter | 100% (3/3) | 74 to 80 ms | 44.8 / 37.8 / 25.4% |
+| Pinned, 2 busy loops on the server cores (`ci-41264579093`) | Limiter only | 100% (3/3) | 78 to 81 ms | 37.4 / 35.7 / 38.4% |
+| | Shed + limiter | 100% (3/3) | 69 to 103 ms | 51.2 / 27.4 / 22.2% |
+
+With two busy loops on the server's two cores, critical was never shed by the curve or by the limiter
+and every request was answered. Request latency stayed under about 100 ms, far below the 300 ms
+threshold that would trigger shedding of critical traffic.
+
 ### 6x spike (Gatling, `scripts/spike.sh`)
 
 100 rps baseline, ramp to 600 rps, hold 30 s, recover. The sleep-based backend serves about
