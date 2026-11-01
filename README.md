@@ -184,8 +184,8 @@ is calls sent to the server per original request. Three runs each.
 | `RetryPolicy` (budget) | 99.4% (99.2-99.7) | 302 ms | 33.6% | 1.00x |
 
 Naive retries make the overload worse: they nearly triple the load from the lower tiers and cost
-critical traffic availability. The retry budget adds about 6% load overall, because the lower
-tiers' `Retry-After` hints (2-10 s) exceed the 1 s it is willing to wait.
+critical traffic availability. The retry budget adds 6% to the critical tier's calls and nothing measurable elsewhere, because
+the lower tiers' `Retry-After` hints (2-10 s) exceed the 1 s it is willing to wait.
 
 Shed critical requests are told `Retry-After: 0` and the client's full-jitter backoff spreads
 them out. An earlier version told them to wait 1 s, which put the critical p99 at about 1.2 s; the
@@ -244,6 +244,21 @@ Checks run to see which results hold up, each against the same spike.
 - **Hot path.** `Sieve.admit()` with two latency signals, 4 threads: about 1.9M admits/s before
   the signals became lock-free and cached, about 3.9M after (one thread: about 1.0M to 2.1M). That
   is about 0.5 microseconds per request, and it was never the bottleneck at the 600 rps used here.
+
+### What these results establish
+
+They establish how the pieces compare on one 4-core machine, at one baseline of 100 rps, against a
+simulated backend that serves about 200 rps: priority shedding keeps critical requests available
+under a 3x overload, orders the lower tiers, and a retry budget stops clients from amplifying it.
+
+They do not establish production capacity, behaviour over a real network, behaviour with a real
+downstream dependency, or a latency advantage for the curves over the limiter alone. Trial order
+was fixed within each round (not shuffled), so slow drift on the machine could favour a later arm.
+The tuned and default thresholds were not statistically separated.
+
+Raw per tier results, server metrics and a manifest of the environment (commit, JDK, kernel, CPU)
+are in `docs/evidence/`; `scripts/archive-evidence.sh` creates a new bundle. Each Gatling run also
+prints a check that critical was never served less than another tier.
 
 ### Limitations
 
