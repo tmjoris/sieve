@@ -75,3 +75,13 @@ if "critical" in avail:
     worse = [t for t in TIERS if t in avail and pct(t) > pct("critical") + 1.0]
     print("check: critical is never served less than another tier:",
           "OK" if not worse else "VIOLATED by " + ", ".join(worse))
+
+# Invariant: every request that arrived was served or shed (no leaked permits). Only meaningful
+# when the server has drained, so it is skipped for the unprotected mode, which keeps working
+# through a backlog after the load ends.
+if mode != "noshed" and os.path.exists(mfile):
+    m = open(mfile).read()
+    arrived = sum(int(v) for v in re.findall(r'sieve_requests_arrived_total\{[^}]*\} (\d+)', m))
+    done = sum(int(v) for v in re.findall(r'sieve_requests_total\{[^}]*\} (\d+)', m))
+    status = "OK" if arrived == done else f"MISMATCH (arrived {arrived}, accounted {done})"
+    print("check: arrived requests equal served plus shed:", status)

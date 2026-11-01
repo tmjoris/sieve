@@ -9,6 +9,17 @@ cd "$(dirname "$0")/.."
 mode=${1:?usage: spike.sh noshed|limiter|shed}
 
 ./gradlew -q :sieve-demo:installDist :sieve-harness:compileGatlingJava || exit 1
+
+# Host load guard: a busy machine makes every number here unreliable. Wait up to
+# SIEVE_WAIT_QUIET seconds (default 90) for the 1 minute load average to drop below
+# SIEVE_MAX_LOAD (default 1.5), then run anyway and flag the result as noisy.
+load1() { cut -d' ' -f1 /proc/loadavg; }
+max_load=${SIEVE_MAX_LOAD:-1.5}
+waited=0
+while awk -v l="$(load1)" -v m="$max_load" 'BEGIN{exit !(l>m)}' && [ "$waited" -lt "${SIEVE_WAIT_QUIET:-90}" ]; do
+  sleep 5; waited=$((waited + 5))
+done
+load_before=$(load1)
 mkdir -p build
 server_pin=""; load_pin=""; gradle_flags=""
 if [ -n "${SIEVE_PIN:-}" ]; then
@@ -24,4 +35,7 @@ sleep 3
 $load_pin ./gradlew $gradle_flags -q :sieve-harness:gatlingRun --simulation dev.sieve.harness.SpikeSimulation > "build/gatling-$mode.log" 2>&1 \
   || { echo "gatling failed, see build/gatling-$mode.log"; exit 1; }
 curl -s localhost:8080/metrics > "build/metrics-$mode.txt"
+load_after=$(load1)
 python3 scripts/summarize.py "$mode"
+noisy=$(awk -v a="$load_before" -v b="$load_after" -v m="$max_load" 'BEGIN{print (a>m || b>m) ? "NOISY" : "quiet"}')
+echo "host load average (1 min): before $load_before, after $load_after, limit $max_load: $noisy"
