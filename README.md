@@ -260,9 +260,32 @@ Raw per tier results, server metrics and a manifest of the environment (commit, 
 are in `docs/evidence/`; `scripts/archive-evidence.sh` creates a new bundle. Each Gatling run also
 prints a check that critical was never served less than another tier.
 
+### Decisions and rejected ideas
+
+| Idea | What I measured | Decision |
+|---|---|---|
+| One latency threshold for every tier | Critical was shed at 87-90% success in the 400 rps phase | Replaced by a target threshold (lower tiers only) and a max threshold (everything) |
+| Bare Gradient2 limiter | Limiter-only critical success 79.6% | Wrapped in `WindowedLimit`: 99.9% |
+| Library limits (20 / 20) against tight limits (10 / 4) | Same critical availability; limiter-only critical p50 100 ms against 60 ms | Library keeps its defaults; the demo uses 10 / 4 |
+| 2 s signal window instead of 5 s | Cold start 71% against 16% critical, but 62% against 80% at 800 rps, one run each | Not adopted, inconclusive |
+| Probe fraction to break the low traffic latch | Not run: the latch is already bounded by the window, and a 1% probe cannot dilute stale samples faster | Rejected on reasoning |
+| Tuned thresholds | Score +8% in the tuner, not separable from defaults in the full spike | Defaults kept |
+| Critical `Retry-After` of 1 s | Retried critical p99 1.2 s | Changed to 0 with client jitter: 0.3 s |
+| System wide CPU signal | Critical 79-96% depending on what else ran on the machine | `CpuSignal.process()` added: 100%; Spring default stays `system` to match autoscalers |
+| Lock held on every signal read | 1.9M admits/s on 4 threads | Lock free and cached: 3.9M |
+| io_uring | Not measured; syscall cost is negligible at these rates | Not pursued |
+
 ### Limitations
 
 - The backend is simulated and the machine is shared with the load generator.
+- The machine was shared with other work. Load averages of 6 to 8 on 4 cores were seen late in
+  the session, and the harness records host load only from then on, so earlier batches may carry
+  interference that I cannot rule out. Interleaving and repeats reduce it without removing it.
+  An overload search from 6x to 12x taken under that load gave shed mode critical success of
+  63.6% to 80.7% and limiter-only 49.9% to 99.6%, and two reruns of the standard 6x spike gave
+  99.1% and 90.4%. I do not report those as results. Mixed rounds like this suggest the latency
+  thresholds may be more sensitive to a noisy host than the concurrency limiter, but I have not
+  tested that.
 - Latency figures depend on how much CPU the server has to itself (see "Controls"): unpinned runs
   and runs with the Prometheus and Grafana containers up differ by 2-3x in critical p50. Compare
   modes only within the same setup.
