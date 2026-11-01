@@ -66,3 +66,12 @@ for tier in TIERS:
     p50, p99 = lat.get(tier, (None, None))
     f = lambda v: "-" if v is None else f"{v * 1000:.0f}"
     print(f"{tier:<12}{total:>10}{100.0 * ok / max(total, 1):>9.1f}%{f(p50):>15}{f(p99):>15}")
+
+# Invariant: no lower tier may do better than critical (small tolerance for noise).
+if "critical" in avail:
+    def pct(t):
+        total, ok = avail[t]
+        return 100.0 * ok / max(total, 1)
+    worse = [t for t in TIERS if t in avail and pct(t) > pct("critical") + 1.0]
+    print("check: critical is never served less than another tier:",
+          "OK" if not worse else "VIOLATED by " + ", ".join(worse))
