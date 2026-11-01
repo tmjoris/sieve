@@ -100,7 +100,7 @@ sieve:
   latency-max: 300ms
   windowed: true                # wrap Gradient2 in WindowedLimit (default)
   cpu-autoscale-target: 0.5     # optional
-  cpu-scope: system             # or process; see "CPU-bound backend" below
+  cpu-scope: system             # or process; see docs/results.md, "CPU-bound backend"
   default-priority: best_effort
 ```
 
