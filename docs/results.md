@@ -1,61 +1,136 @@
 # Results in detail
 
-The headline numbers are in the [README](../README.md#at-a-glance). Everything here was measured on
-one 4-core machine against the demo backend, with the load generator on the same machine. The
-numbers show how the pieces behave relative to each other; they are not claims about production
-capacity.
+The headline is in the [README](../README.md#at-a-glance). Everything here was measured against
+the demo backend (a simulated service that sleeps 20 ms per request on 4 workers, so it serves about
+200 requests per second) with the Gatling spike harness: a 100 requests per second baseline, a
+ramp to a peak, 30 s at the peak, then recovery. Traffic is 20% critical, 30% degraded, 30%
+best-effort and 20% bulk. Success is the client view; a 503 or a timeout counts as a failure.
+The main comparisons ran on GitHub Actions runners (4 vCPU, idle before each run) and were
+interleaved: every round runs each configuration once, so they share the same conditions.
 
-Everything below was measured on one 4-core machine against the demo backend, with the load
-generator on the same machine. The numbers show how the pieces behave relative to each other;
-they are not claims about production capacity. Read "Limitations" for how noisy that machine was.
+## Recommended setup
 
-### Clean hardware: GitHub Actions
+- Windowed Gradient2 limit (initial 10, minimum 4, maximum 200), critical-first tier shares.
+- Graded tier thresholds (`TierPolicy.graded()`: bulk gives way at 50% of the limit, best-effort at
+  70%, degraded at 85%, critical never). They order the lower tiers from the limiter alone.
+- A critical floor sized to the critical request rate times the longest stall you want to ride out.
+- The latency and CPU shed curves are optional. They help when the limiter cannot see the overload
+  (an IO-bound service, a slow downstream) and at extreme overload.
 
-`benchmark.yml` runs the spike on a GitHub runner (4 vCPU, a shared VM that was 0 to 2% busy before
-every run) and archives the raw results with a manifest (`docs/evidence/ci-*.tar.gz`, clean working
-tree). The runner CPU varies between runs: an AMD EPYC 7763 for the first run, an EPYC 9V45 for the
-three-round run below. Both sanity checks (critical never served less than another tier, every
-request accounted for) passed in every run.
+The thresholds are the main knob and were not tuned: how aggressive they are trades critical
+availability against the lower tiers' share (see the threshold sensitivity below).
 
-| Run | Mode | Critical success | Critical p99 | Degraded / best-effort / bulk |
-|---|---|---|---|---|
-| 3 rounds, unpinned (`ci-41264607016`) | Limiter only | 100% (3/3) | 70 to 81 ms | 39.6 / 35.2 / 39.0% |
-| | Shed + limiter | 100% (3/3) | 70 to 81 ms | 45.1 / 34.4 / 31.0% |
-| 3 rounds, pinned (`ci-41264570959`) | Limiter only | 100% (3/3) | 69 to 83 ms | 38.5 / 35.5 / 39.6% |
-| | Shed + limiter | 100% (3/3) | 74 to 80 ms | 44.8 / 37.8 / 25.4% |
-| Pinned, 2 busy loops on the server cores (`ci-41264579093`) | Limiter only | 100% (3/3) | 78 to 81 ms | 37.4 / 35.7 / 38.4% |
-| | Shed + limiter | 100% (3/3) | 69 to 103 ms | 51.2 / 27.4 / 22.2% |
+## Headline: 6x spike, five interleaved rounds
 
-With two busy loops on the server's two cores, critical was never shed by the curve or by the limiter
-and every request was answered. Request latency stayed under about 100 ms, far below the 300 ms
-threshold that would trigger shedding of critical traffic.
-
-### 6x spike (Gatling, `scripts/spike.sh`)
-
-100 rps baseline, ramp to 600 rps, hold 30 s, recover. The sleep-based backend serves about
-200 rps, so the peak is about 3x its capacity. Success is the client view (a 503 or a timeout is a
-failure). Latency is for served requests, estimated from the server's histogram. Three rounds per
-mode, interleaved to cancel drift. These runs predate the lock free signals and the critical
-`Retry-After` change listed under "Decisions". Two later batches of the shed mode gave critical
-99.2% to 100%, but three runs taken while the machine was heavily loaded gave 80.7%, 99.1% and
-90.4% (see "Limitations").
-
-| Mode | Critical success | Critical p50 / p99 | Degraded / best-effort / bulk success |
+| Configuration | Critical success | Critical p50 / p99 | Degraded / best-effort / bulk |
 |---|---|---|---|
-| No protection | 20.4% | timeouts (5 s) | 20.5 / 20.4 / 20.4% |
-| Limiter only (windowed Gradient2) | 100% (3/3) | 68 / 99 ms | 36.5 / 35.6 / 39.5%, no ordering |
-| Shed curves + limiter, default thresholds | 99.4% (98.4-100) | 23 / 151-239 ms | 46.2 / 21.6 / 18.5%, ordered |
-| Shed curves + limiter, tuned thresholds | 100% (3/3) | 21 / 194-216 ms | 43.3 / 20.7 / 17.7%, ordered |
+| Limiter only | 100% (5/5) | 53 / 77 ms | 39 / 36 / 39%, no order |
+| Limiter + graded tiers | 100% (5/5) | 49 / 69 ms | 61 / 26 / 20%, ordered |
+| Shed curves + limiter | 100% (5/5) | 55 / 76 ms | 45 / 37 / 27% |
+| Shed curves + graded tiers | 100% (5/5) | 50 / 69 ms | 61 / 26 / 20%, ordered |
 
-What this shows:
+Critical is 100% everywhere at 6x, so this peak cannot separate the configurations on availability.
+Graded tiers separate them on ordering and latency, in every round. With graded tiers on, the shed
+curves change nothing at this peak. For comparison, with no protection every tier gets about 20%
+and latency runs into the client timeout (3 rounds on the same type of runner).
 
-- Without protection, every tier fails equally and latency runs into the client timeout.
-- The windowed adaptive limiter alone already keeps critical traffic available on this backend.
-- The shed curves add a real priority order among the lower tiers: degraded is served more than
-  best-effort, more than bulk. The limiter alone treats those three the same.
-- In these unpinned runs the curves also gave lower critical median latency (23 ms against 68 ms),
-  but that gap did not survive a fairer comparison; see "Controls" below.
-- The tuned thresholds are not distinguishable from the hand-picked defaults on goodput.
+## Overload: 10x, six interleaved rounds
+
+At a 10x peak (1,000 requests per second) critical traffic alone is about 200 requests per second,
+the backend's whole capacity, so these numbers measure behaviour at saturation, not policy quality.
+
+| Configuration | Limiter only | With shed curves |
+|---|---|---|
+| Baseline | 80.8% (sd 0.8) | 86.9% (sd 1.3) |
+| Graded tiers | 90.5% (sd 1.0) | 90.4% (sd 1.1) |
+| Critical floor 8 | 88.7% (sd 0.6) | 99.6% (sd 0.1) |
+| Graded tiers + floor 8 | 97.0% (sd 0.8) | 99.5% (sd 0.1) |
+
+Critical median p99 is 69 ms with graded tiers alone and 98 to 108 ms with a floor, because requests
+the floor admits above the limit wait. In every configuration the losses were requests rejected by
+the concurrency limit, never by a curve. At this saturation the floor is what keeps critical near
+100% when the curves are on; the graded tiers add nothing for critical there but keep the ordering.
+
+A sweep of the baseline from 3x to 16x (2 rounds each, separate batch) shows where it starts to
+fail:
+
+| Peak | Limiter only | Shed curves + limiter |
+|---|---|---|
+| 3x, 6x | 100% | 100% |
+| 8x | 92.3% | 96.2% |
+| 10x | 80.7% | 87.3% |
+| 12x | 71.7% | 77.5% |
+| 16x | 57.0% | 60.7% |
+
+## Threshold sensitivity
+
+Three threshold sets for degraded / best-effort / bulk, limiter only, at 10x, three interleaved
+rounds. Critical is always 1.0.
+
+| Thresholds | Critical success | Degraded / best-effort / bulk |
+|---|---|---|
+| 0.95 / 0.85 / 0.70 | 86.4% (sd 1.8) | 28 / 16 / 13% |
+| 0.85 / 0.70 / 0.50 (default) | 93.3% (sd 2.4) | 26 / 14 / 12% |
+| 0.70 / 0.50 / 0.30 | 99.3% (sd 0.5) | 22 / 14 / 10% |
+
+The ordering never flips, but critical availability at saturation depends strongly on how early the
+lower tiers give way. More aggressive thresholds buy critical at the price of the lower tiers.
+
+## A second backend
+
+A different service: 8 workers at 50 ms (capacity about 160 requests per second), a 50 requests per
+second baseline and an 8x peak, three interleaved rounds. Critical was 100% in every configuration,
+so this load did not stress it. The tier ordering did transfer: limiter only gave 50 / 37 / 42%
+(no order) and graded tiers gave 78 / 24 / 18%, with similar latency (p99 133 against 135 ms).
+
+## Stalls, and the low critical runs
+
+Some runs on my own laptop had lower critical success than the clean runner, with no client
+timeouts. The outcome breakdown showed where the lost critical requests went: a few per cent
+rejected by the concurrency limit and about 1% shed by the max-latency curve. A stall reproduces it:
+`SIEVE_STALL_MS=400 SIEVE_STALL_EVERY_S=8` freezes request processing for 400 ms every 8 s, like a
+GC pause or a CPU starvation burst (6x peak, three rounds).
+
+| Configuration under the stall | Critical success | Critical rejected per run (limiter / curve) | Critical p99 |
+|---|---|---|---|
+| Baseline, limiter only | 97.0% | 194 / 0 | 363 to 378 ms |
+| Baseline, curves, 5 s window | 97.4% | 166 / 0 | 372 to 388 ms |
+| Baseline, curves, 2 s window | 97.1% | about 170 / about 16 | 382 to 384 ms |
+| Baseline, curves, 1 s window | 90.3% | about 160 / about 463 | 392 to 417 ms |
+| Critical floor 64, limiter only | 100% (3/3) | 0 / 0 | 445 to 458 ms |
+| Critical floor 64, curves | 100% (3/3) | 0 / 0 | 428 to 454 ms |
+| Graded tiers + floor 64 | 100% (3/3) | 0 / 0 | 448 to 462 ms |
+
+- A stall freezes the backend, latency spikes, the adaptive limit shrinks, and the limiter rejects
+  critical requests. That is the main loss (about 3%).
+- A shorter signal window makes it worse: the stall is a bigger fraction of a 1 s window, so the max
+  curve fires and sheds critical traffic too. The default 5 s window absorbs it.
+- A floor sized to the stall's burst removes the loss completely: 120 critical requests per second
+  times 0.4 s is about 48 requests in flight, so a floor of 64 covers it and a floor of 8 does not.
+  The price is latency: those requests wait out the stall instead of being rejected (p99 about
+  75 ms higher).
+- On the laptop, a floor of 8 halved the limiter's rejections of critical requests (596 to 218 over
+  four runs) without removing them, which fits the sizing rule.
+
+## Vegas against Gradient2
+
+Netflix's README recommends Vegas on servers, so I compared them (6x, three interleaved rounds):
+critical was 100% for both. Vegas had about 10 to 15% lower latency (limiter only: p50 47 to 48
+against 52 to 54 ms, p99 73 to 77 against 80 to 83 ms), but with the shed curves it lost the tier
+ordering (41 / 34 / 37% against 48 / 35 / 25%), because latency stayed under the curves'
+thresholds. Three rounds do not support a ranking.
+
+### What these results establish
+
+On a simulated backend and clean runners: graded tier thresholds order the lower tiers from the
+limiter alone and lower tail latency, without any latency or CPU signal; they raise critical
+availability under heavy overload; a critical floor sized to a burst removes losses from stalls; and
+the ordering transferred to a second backend.
+
+They do not establish production capacity, behaviour over a real network or against a real
+downstream service, any ranking between Gradient2 and Vegas, that the default thresholds are
+optimal, or that a floor of any particular size generalizes. Critical availability beyond about
+8x measures saturation.
 
 ### Static limit baseline
 
@@ -77,24 +152,6 @@ Little's law almost exactly: limit divided by capacity, so 8, 32 and 128 give ab
 640 ms. The limit has to be picked by hand for the backend, and it gives every tier the same share.
 The adaptive limiter finds a good operating point without being told, and the priorities decide who
 gets the capacity.
-
-### Dashboards
-
-Prometheus and Grafana (`monitoring/`, `docker compose up -d`) with a provisioned dashboard.
-The same spike, without protection and with Sieve:
-
-![Spike without protection](grafana-noshed.png)
-
-Without protection, goodput is stuck at the backend's capacity while latency climbs to tens of
-seconds. The server keeps finishing a backlog of requests whose clients gave up after 5 s, which
-is why "availability" in the server's own view rises above 100% at the end; the client view in the
-table above is the real one.
-
-![Spike with Sieve](grafana-shed.png)
-
-With Sieve, offered load reaches 600 req/s while goodput holds near capacity. All critical
-traffic (120 req/s) is served and the lower tiers absorb the shedding. The flat 100 ms p99 is the
-histogram's bucket boundary, not a measurement of exactly 100 ms.
 
 ### Retry storms (`scripts/retry-storm.sh`)
 
@@ -138,6 +195,24 @@ because they were no longer shed for CPU the server did not use. On a shared mac
 `CpuSignal.process()`; where the signal must line up with an autoscaler that scales on instance
 CPU, use `system()` (Spring: `sieve.cpu-scope`).
 
+### Dashboards
+
+Prometheus and Grafana (`monitoring/`, `docker compose up -d`) with a provisioned dashboard.
+The same spike, without protection and with Sieve:
+
+![Spike without protection](grafana-noshed.png)
+
+Without protection, goodput is stuck at the backend's capacity while latency climbs to tens of
+seconds. The server keeps finishing a backlog of requests whose clients gave up after 5 s, which
+is why "availability" in the server's own view rises above 100% at the end; the client view in the
+table above is the real one.
+
+![Spike with Sieve](grafana-shed.png)
+
+With Sieve, offered load reaches 600 req/s while goodput holds near capacity. All critical
+traffic (120 req/s) is served and the lower tiers absorb the shedding. The flat 100 ms p99 is the
+histogram's bucket boundary, not a measurement of exactly 100 ms.
+
 ### Auto-tuner (`sieve-demo`, `Tuner`)
 
 Coordinate descent over the shedding thresholds, each trial a real server process under a real
@@ -169,55 +244,37 @@ Checks run to see which results hold up, each against the same spike.
   the signals became lock-free and cached, about 3.9M after (one thread: about 1.0M to 2.1M). That
   is about 0.5 microseconds per request, and it was never the bottleneck at the 600 rps used here.
 
-### What these results establish
-
-They establish how the pieces compare on one 4-core machine, at one baseline of 100 rps, against a
-simulated backend that serves about 200 rps: priority shedding keeps critical requests available
-under a 3x overload, orders the lower tiers, and a retry budget stops clients from amplifying it.
-
-They do not establish production capacity, behaviour over a real network, behaviour with a real
-downstream dependency, or a latency advantage for the curves over the limiter alone. Trial order
-was fixed within each round (not shuffled), so slow drift on the machine could favour a later arm.
-The tuned and default thresholds were not statistically separated.
-
-Raw per tier results, server metrics and a manifest of the environment (commit, JDK, kernel, CPU)
-are in `docs/evidence/`; `scripts/archive-evidence.sh` creates a new bundle. Each Gatling run also
-prints a check that critical was never served less than another tier.
-
 ### Decisions and rejected ideas
 
 | Idea | What I measured | Decision |
 |---|---|---|
-| One latency threshold for every tier | Critical was shed at 87-90% success in the 400 rps phase | Replaced by a target threshold (lower tiers only) and a max threshold (everything) |
+| One latency threshold for every tier | Critical was shed at 87 to 90% success in the 400 rps phase | Replaced by a target threshold (lower tiers only) and a max threshold (everything) |
 | Bare Gradient2 limiter | Limiter-only critical success 79.6% | Wrapped in `WindowedLimit`: 99.9% |
 | Library limits (20 / 20) against tight limits (10 / 4) | Same critical availability; limiter-only critical p50 100 ms against 60 ms | Library keeps its defaults; the demo uses 10 / 4 |
-| 2 s signal window instead of 5 s | Cold start 71% against 16% critical, but 62% against 80% at 800 rps, one run each | Not adopted, inconclusive |
-| Probe fraction to break the low traffic latch | Not run: the latch is already bounded by the window, and a 1% probe cannot dilute stale samples faster | Rejected on reasoning |
-| Tuned thresholds | Score +8% in the tuner, not separable from defaults in the full spike | Defaults kept |
+| Latency curves to order the tiers | Weak ordering (45 / 37 / 27%), only when latency crosses the thresholds | Graded thresholds on the limit instead: 61 / 26 / 20% with no signal |
+| Short signal window (1 s) | Under a 400 ms stall critical fell to 90.3% | Keep 5 s |
+| Probe fraction to break the low traffic latch | Not run: the latch is bounded by the window | Rejected on reasoning |
+| Tuned curve thresholds | Score +8% in the tuner, not separable from defaults | Defaults kept |
 | Critical `Retry-After` of 1 s | Retried critical p99 1.2 s | Changed to 0 with client jitter: 0.3 s |
-| System wide CPU signal | Critical 79-96% depending on what else ran on the machine | `CpuSignal.process()` added: 100%; Spring default stays `system` to match autoscalers |
+| System wide CPU signal | Critical 79 to 96% depending on what else ran on the machine | `CpuSignal.process()` added: 100% |
 | Lock held on every signal read | 1.9M admits/s on 4 threads | Lock free and cached: 3.9M |
+| `admit()` allocated on every call | 125 to 152 bytes per admit, 48 per curve shed, 128 per limiter shed | Cached ids and shed results: 59 to 96, 0 and 32 |
+| Cold start sheds lower tiers | First 6 s: degraded 88%, best-effort 84%, bulk 77% | Optional warm-up (`SIEVE_WARMUP_S`): 98%, 97%, 98% |
+| Critical floor of 8 | Halves limiter rejections on a noisy laptop, no effect at 6x, 99.5% at 10x | Optional; size it to the critical rate times the stall |
+| Vegas | Same critical as Gradient2, 10 to 15% lower latency, no ranking supported | Offered as an option |
 | io_uring | Not measured; syscall cost is negligible at these rates | Not pursued |
-| `admit()` allocated on every call | 125 to 152 bytes per admit and success, 48 bytes per curve shed, 128 per limiter shed | Cached the priority id and the shed results: about 59 to 96, 0 and 32 bytes |
-| Cold start sheds lower tiers | First 6 s at half capacity: degraded 88%, best-effort 84%, bulk 77% success | Optional warm-up before opening the port (`SIEVE_WARMUP_S`): 98%, 97%, 98% |
 
 ### Limitations
 
-- The backend is simulated and the machine is shared with the load generator.
-- The machine was shared with other work (a browser, other editor sessions and background
-  indexing). With none of my processes running, the whole machine measured 18% to 37% busy over
-  six 5 second samples, about one core of four. I did not record host state for most runs. Late in the session the shed mode gave inconsistent critical success at the standard
-  6x spike (99.1%, 90.4%) and in an overload search from 6x to 12x (63.6% to 80.7%), against 99.2%
-  to 100% in two earlier batches. I could not establish the cause and do not report those as
-  results. I first blamed load averages of 6 to 8, but those were mostly this benchmark's own
-  load, so they are not evidence of interference. The harness's busy check was reworked for that
-  reason: the harness now samples CPU busy time instead (see
-  [configuration.md](configuration.md)), and with a 15% limit it flags every run on this machine as
-  noisy.
-- Latency figures depend on how much CPU the server has to itself (see "Controls" above): unpinned runs
-  and runs with the Prometheus and Grafana containers up differ by 2-3x in critical p50. Compare
-  modes only within the same setup.
-- Per-tier p99 comes from histogram buckets (1.25x steps in the latest version, coarser in the
-  runs in the first tables).
-- The limiter's tight floor and starting limit (4 and 10) are tuned to this 4-worker backend and
-  are not general defaults. The library's own defaults (20 and 20) are looser.
+- Two simulated backends and one spike shape. Numbers compare configurations against each other.
+- The 10x results measure saturation: critical traffic alone fills the backend there.
+- The thresholds (0.85 / 0.70 / 0.50) and the floor sizes were not tuned. The sensitivity runs show
+  critical availability at saturation depends strongly on them.
+- The main claims rest on 5 to 6 interleaved rounds; the sweeps and the stall tests on 2 to 3.
+- GitHub's runner CPU varies between runs (an AMD EPYC 7763 and a 9V45 were seen).
+- My laptop results, which are older and noisier, are only used for the stall diagnosis.
+
+### Evidence
+
+Raw per-run output and an environment manifest (commit, JDK, kernel, CPU) for each GitHub run are in
+`docs/evidence/ci-<run id>.tar.gz`. Headline (6x, five rounds): 41275236127, 41275248281, 41275259885, 41275271506, 41275282720. 10x interleaved (six rounds): 41275077054, 41275087565, 41275097284, 41275106702, 41275115067, 41275124573. Threshold sensitivity: 41275149987, 41275160508, 41275169409. Second backend: 41275177856, 41275188160, 41275201320. Stall tests: 41268718945, 41268732308, 41268745067, 41274725486, 41274736283.

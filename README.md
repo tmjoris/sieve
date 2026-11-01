@@ -18,24 +18,26 @@ quoting a number.
 ## At a glance
 
 A 6x traffic spike (100 to 600 requests per second) against a simulated backend that serves about
-200 per second. Three rounds per mode on a GitHub Actions runner (4 vCPU, idle before each run),
-current code, clean tree:
+200 per second. Five interleaved rounds on GitHub Actions runners (4 vCPU, idle before each run):
 
-| | Critical success | Degraded / best-effort / bulk |
-|---|---|---|
-| No protection | 20% | 20 / 20 / 20% |
-| Adaptive limiter only | 100% | 40 / 35 / 39%, no order |
-| Sieve (shed curves + limiter) | 100% | 45 / 34 / 31%, in priority order |
+| | Critical success | Critical p99 | Degraded / best-effort / bulk |
+|---|---|---|---|
+| No protection | 20% | timeouts | 20 / 20 / 20% |
+| Adaptive limiter only | 100% | 77 ms | 39 / 36 / 39%, no order |
+| Limiter + graded tier thresholds | 100% | 69 ms | 61 / 26 / 20%, in priority order |
 
 ![Offered load and goodput under the spike, with Sieve](docs/grafana-shed.png)
 
 - Under overload, critical requests stay available and the lower tiers are shed in order.
-- The adaptive limiter alone already protects critical traffic; the shed curves add the ordering
-  among the lower tiers. On my laptop the gap was wider (46 / 22 / 18%).
+- Graded tier thresholds, a fraction of the concurrency limit per tier, order the lower tiers from
+  the limiter alone. No latency or CPU signal to tune, and the tail is shorter.
+- Under heavy overload (a 10x peak, where critical alone nearly fills the backend) critical success
+  went from 80.8% to 90.5% with graded tiers, and to 97 to 99.5% with a critical floor.
 - Client retries matter: two immediate retries cut critical success to 90% and nearly tripled the
   load from the lower tiers, while Sieve's retry budget kept it at 99.4%.
-- This is a simulated backend. Details, the corrections I made along the way, and the runs that
-  did not behave are in [Results](#results) and [docs/results.md](docs/results.md).
+- This is a simulated backend, and the thresholds and floor sizes are untuned guesses. Details,
+  the corrections I made along the way, and the runs that did not behave are in
+  [docs/results.md](docs/results.md).
 
 ## Quick start
 
@@ -68,9 +70,12 @@ in [docs/configuration.md](docs/configuration.md).
 ### Plain Java
 
 ```java
-Sieve sieve = Sieve.builder(PriorityLimiter.withWindowedGradient2(
-                TierShares.criticalFirst(), /*initial*/ 10, /*min*/ 4, /*max*/ 200))
-        // lower tiers shed as requests pass the 60 ms target, never critical
+Sieve sieve = Sieve.builder(new PriorityLimiter(
+                Limits.windowedGradient2(/*initial*/ 10, /*min*/ 4, /*max*/ 200),
+                TierShares.criticalFirst(),
+                // lower tiers give way at 50 / 70 / 85% of the limit; critical gets 8 reserved slots
+                TierPolicy.graded().withCriticalFloor(8)))
+        // optional: lower tiers shed as requests pass the 60 ms target, never critical
         .latencySlo(LatencySloSignal.of(Duration.ofMillis(60)), ShedCurve.prioritized(0.10, 0.40))
         // everything shed as requests approach the 300 ms timeout
         .latencySlo(LatencySloSignal.of(Duration.ofMillis(300)), ShedCurve.unprioritized(0.10, 0.40))
@@ -99,6 +104,10 @@ sieve:
   latency-target: 60ms
   latency-max: 300ms
   windowed: true                # wrap Gradient2 in WindowedLimit (default)
+  limit-algorithm: gradient2    # or vegas
+  tiers: graded                 # default; lower tiers give way earlier as the limit fills. none to disable
+  critical-floor: 8             # critical slots always admitted; size to critical rate x longest stall
+  signal-window: 5s             # window of the latency signals; keep it long
   cpu-autoscale-target: 0.5     # optional
   cpu-scope: system             # or process; see docs/results.md, "CPU-bound backend"
   default-priority: best_effort
@@ -127,21 +136,20 @@ retries are dropped first. The server's hints do part of the work: critical requ
 
 ## Results
 
-The 6x spike (100 to 600 requests per second, backend capacity about 200), three rounds per mode,
-on a GitHub Actions runner. Success is the client view; a 503 or a timeout counts as a failure.
-The workflow is [`benchmark.yml`](.github/workflows/benchmark.yml); the raw results are in
-`docs/evidence/`.
+The headline above is five interleaved rounds on GitHub Actions runners. The workflow is
+[`benchmark.yml`](.github/workflows/benchmark.yml) and the raw results with an environment manifest
+are in `docs/evidence/`.
 
-| Mode | Critical success | Critical p50 / p99 | Degraded / best-effort / bulk |
-|---|---|---|---|
-| No protection | 20.2% | timeouts | 20.2 / 20.2 / 20.2% |
-| Limiter only (windowed Gradient2) | 100% (3/3) | 52 / 70 to 81 ms | 39.6 / 35.2 / 39.0%, no order |
-| Shed curves + limiter | 100% (3/3) | 52 to 57 / 70 to 81 ms | 45.1 / 34.4 / 31.0%, ordered |
+Under a 10x peak, where critical traffic alone nearly fills the backend (six interleaved rounds):
 
-On my own machine, the same spike gave critical 98.4 to 100% for the shed mode and a wider tier
-ordering (46 / 22 / 18%).
+| Configuration | Critical success, limiter only | Critical success, with shed curves |
+|---|---|---|
+| Baseline | 80.8% | 86.9% |
+| Graded tier thresholds | 90.5% | 90.4% |
+| Critical floor 8 | 88.7% | 99.6% |
+| Graded thresholds + floor 8 | 97.0% | 99.5% |
 
-And a retry storm (a sudden 600 rps for 10 s), three runs each:
+A retry storm (a sudden 600 rps for 10 s), three runs each:
 
 | Client retries | Critical success | Critical p99 | Degraded success | Load, degraded tier |
 |---|---|---|---|---|
@@ -149,17 +157,19 @@ And a retry storm (a sudden 600 rps for 10 s), three runs each:
 | Two immediate retries | 90.0% | 2.7 s | 11.5% | 2.87x |
 | `RetryPolicy` (budget) | 99.4% | 302 ms | 33.6% | 1.00x |
 
-The CPU-bound backend, the threshold tuner, the control experiments (core pinning, limiter
-limits, hot path), the Grafana screenshots and the table of ideas I tried and rejected are in
-[docs/results.md](docs/results.md).
+[docs/results.md](docs/results.md) has the rest: threshold sensitivity, a second backend, a
+400 ms stall test that explains the low critical runs I saw locally, Vegas against Gradient2, a
+static-limit baseline that checks Little's law, the CPU-bound backend, and a table of ideas I
+tried and rejected.
 
 ## Limitations
 
-- The backend is simulated and the load generator shares the machine. The numbers compare modes
-  against each other; they are not production capacity.
-- The machine was shared with other work, and a few runs gave lower critical success than the
-  table above. See [docs/results.md](docs/results.md#limitations) for what I found.
-- Trial order was fixed within each round, so slow drift could favour a later arm.
+- Two simulated backends and one spike shape; the numbers compare configurations against each other
+  and are not production capacity.
+- The thresholds (50 / 70 / 85% of the limit) and the floor sizes are untuned, and critical
+  availability at saturation depends strongly on them.
+- Stalls once made critical traffic fail on my laptop: the adaptive limit shrinks and rejects it. A
+  floor sized to the stall removes that on a clean runner (see docs/results.md).
 
 ## Known issues
 
@@ -167,19 +177,24 @@ limits, hot path), the Grafana screenshots and the table of ideas I tried and re
   (critical is not). The demo can warm up before serving (`SIEVE_WARMUP_S`), which cut that from
   12 to 23% of lower-tier requests to about 2%.
 - The CPU curve starts shedding critical requests at 80% CPU by design.
-- The tuner found no configuration better than the defaults on this backend.
+- The threshold tuner searches the curve thresholds, which turned out to matter little; the graded
+  thresholds are the knob that matters and are not tuned automatically yet.
 - There is no Spring Boot demo application; the Spring module is covered by unit and end to end
   tests, and the benchmarks use a small JDK HTTP server.
 
 ## Design
 
 Requests carry one of four priorities: `CRITICAL`, `DEGRADED`, `BEST_EFFORT`, `BULK`.
-Three mechanisms work together:
+Requests are admitted by the mechanisms below. The recommended setup is the first and third, with
+the second optional.
 
-1. **Utilization-based shedding.** A per-tier shed probability, driven by CPU or by the
+1. **Graded tier thresholds.** A tier is refused once the requests in flight reach its fraction of
+   the current concurrency limit (bulk 50%, best-effort 70%, degraded 85%, critical never), and
+   critical keeps an optional floor of reserved slots. This orders the tiers with no extra signal.
+2. **Utilization-based shedding.** A per-tier shed probability, driven by CPU or by the
    fraction of requests slower than a latency SLO. Shedding starts above the autoscaling
    target so autoscaling still sees the signal.
-2. **Two latency measures**, as in Netflix's `slo_target` / `slo_max`: the fraction of requests
+   **Two latency measures**, as in Netflix's `slo_target` / `slo_max`: the fraction of requests
    slower than a target sheds the lower tiers only, and the fraction slower than a max
    (timeout-like) threshold sheds every tier. Critical traffic is only touched when requests
    are close to timing out.

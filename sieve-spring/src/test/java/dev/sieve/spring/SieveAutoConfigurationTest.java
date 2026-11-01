@@ -83,4 +83,11 @@ class SieveAutoConfigurationTest {
                     assertTrue(ctx.getBean(Sieve.class) != null);
                 });
     }
+
+    @Test
+    void gradedTiersAreTheDefaultAndCanBeTurnedOff() {
+        runner.run(ctx -> assertEquals("graded", ctx.getBean(SieveProperties.class).getTiers()));
+        runner.withPropertyValues("sieve.tiers=none")
+                .run(ctx -> assertEquals("none", ctx.getBean(SieveProperties.class).getTiers()));
+    }
 }

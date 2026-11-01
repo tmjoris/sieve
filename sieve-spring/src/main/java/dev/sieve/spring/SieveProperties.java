@@ -19,10 +19,10 @@ public class SieveProperties {
     /** "gradient2" (default) or "vegas". */
     private String limitAlgorithm = "gradient2";
     /**
-     * "none" (default) or "graded": lower tiers give way earlier as the limit fills up (bulk at
+     * "graded" (default) or "none": lower tiers give way earlier as the limit fills up (bulk at
      * 50% of the limit, best-effort 70%, degraded 85%), so the limiter orders the tiers by itself.
      */
-    private String tiers = "none";
+    private String tiers = "graded";
     /** Critical requests always admitted even when the limit is full, up to this many in flight. */
     private int criticalFloor = 0;
     /** Window of the latency signals. Longer rides out brief stalls; shorter reacts faster. */
