@@ -13,6 +13,12 @@ on:
         description: Pin the server and the load generator to separate cores
         type: boolean
         default: false
+      modes:
+        description: Modes to run, space separated (noshed fixed limiter shed)
+        default: "noshed limiter shed"
+      contention:
+        description: Busy loops to run on the server's cores (needs pin)
+        default: "0"
 
 permissions:
   contents: read
@@ -44,10 +50,12 @@ jobs:
         env:
           SIEVE_PIN: ${{ inputs.pin == true && '1' || '' }}
           ROUNDS: ${{ inputs.rounds }}
+          MODES: ${{ inputs.modes }}
+          SIEVE_CONTENTION: ${{ inputs.contention }}
         run: |
           mkdir -p results
           for r in $(seq 1 "$ROUNDS"); do
-            for m in noshed limiter shed; do
+            for m in $MODES; do
               echo "=== round $r $m" >> results/ci-spike.txt
               scripts/spike.sh "$m" >> results/ci-spike.txt 2>&1 \
                 || echo "run failed: $m" >> results/ci-spike.txt

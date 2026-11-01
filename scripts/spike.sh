@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run the Gatling spike against the demo server in one mode and print per-tier results.
 # usage: scripts/spike.sh noshed|fixed|limiter|shed   (fixed: SIEVE_FIXED_LIMIT, default 32)
+# SIEVE_CONTENTION=N adds N busy loops on the server's cores.
 # SIEVE_SERVER_JVM sets JVM flags for the server only (e.g. "-XX:+UseSerialGC -Xmx512m").
 # Set SIEVE_PIN=1 to pin the server and the load generator to separate cores (defaults: server
 # on 0,1 and Gatling on 2,3; override with SIEVE_SERVER_CPUS / SIEVE_LOAD_CPUS). That removes the
@@ -37,7 +38,14 @@ if [ -n "${SIEVE_PIN:-}" ]; then
 fi
 JAVA_OPTS="${SIEVE_SERVER_JVM:-}" $server_pin sieve-demo/build/install/sieve-demo/bin/sieve-demo "$mode" 8080 > "build/server-$mode.log" 2>&1 &
 server=$!
-trap 'kill $server 2>/dev/null' EXIT
+hogs=""
+# SIEVE_CONTENTION=N starts N busy loops on the server's cores (use with SIEVE_PIN=1), to see how
+# the server behaves when something else is eating its CPU.
+for _ in $(seq "${SIEVE_CONTENTION:-0}"); do
+  taskset -c "${SIEVE_SERVER_CPUS:-0,1}" sh -c 'while :; do :; done' &
+  hogs="$hogs $!"
+done
+trap 'kill $server $hogs 2>/dev/null' EXIT
 sleep 3
 
 $load_pin ./gradlew $gradle_flags -q :sieve-harness:gatlingRun --simulation dev.sieve.harness.SpikeSimulation > "build/gatling-$mode.log" 2>&1 \

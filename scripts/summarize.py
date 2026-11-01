@@ -85,3 +85,23 @@ if mode != "noshed" and os.path.exists(mfile):
     done = sum(int(v) for v in re.findall(r'sieve_requests_total\{[^}]*\} (\d+)', m))
     status = "OK" if arrived == done else f"MISMATCH (arrived {arrived}, accounted {done})"
     print("check: arrived requests equal served plus shed:", status)
+
+# Where did each tier's requests go? Served, shed by a utilization curve, shed by the concurrency
+# limit, or never answered (client timeouts, requests still in flight).
+if os.path.exists(mfile):
+    m = open(mfile).read()
+    def counter(name, tier, outcome=None):
+        pat = (rf'{name}\{{tier="{tier}",outcome="{outcome}"\}} (\d+)' if outcome
+               else rf'{name}\{{tier="{tier}"\}} (\d+)')
+        r = re.search(pat, m)
+        return int(r.group(1)) if r else 0
+    print("outcomes (server side):")
+    print(f"  {'tier':<12}{'sent':>7}{'arrived':>9}{'served':>8}{'shed:curve':>11}{'shed:limit':>11}{'client ok':>10}")
+    for tier in TIERS:
+        if tier not in avail:
+            continue
+        sent, client_ok = avail[tier]
+        print(f"  {tier:<12}{sent:>7}{counter('sieve_requests_arrived_total', tier):>9}"
+              f"{counter('sieve_requests_total', tier, 'ok'):>8}"
+              f"{counter('sieve_requests_total', tier, 'shed_utilization'):>11}"
+              f"{counter('sieve_requests_total', tier, 'shed_limit'):>11}{client_ok:>10}")
