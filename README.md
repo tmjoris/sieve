@@ -189,10 +189,10 @@ scripts/archive-evidence.sh my-label     # bundle raw results with an environmen
 
 `spike.sh` honours `SIEVE_PIN=1` (server on cores 0 and 1, Gatling on 2 and 3),
 `SIEVE_SERVER_JVM` (JVM flags for the server only), `SIEVE_PEAK_MULT` and `SIEVE_BASE_RPS`. Before
-each run it records the host's load average and flags the run as noisy if the machine is busy
-(`SIEVE_MAX_LOAD`, default 1.5; it waits up to `SIEVE_WAIT_QUIET` seconds, default 90, first).
-After each run it checks that critical was never served less than another tier, and that every
-arrived request is accounted for as served or shed.
+each run it measures how busy the whole machine is over 3 seconds and, if that is above
+`SIEVE_MAX_BUSY` percent (default 15), waits up to `SIEVE_WAIT_QUIET` seconds (default 90) before
+running and flags the result as noisy. After each run it checks that critical was never served
+less than another tier, and that every arrived request is accounted for as served or shed.
 
 ## Results
 
@@ -314,6 +314,11 @@ Checks run to see which results hold up, each against the same spike.
   99.9%), limiter-only critical p50 is 100 ms against 60 ms, and degraded goodput under shedding is
   36% against 48%. The defaults are acceptable; sizing the floor to the service buys latency and
   lower-tier goodput, not critical availability.
+- **JVM flags.** Serial GC with a 128 to 768 MiB heap against the default JVM, as one Java
+  submission to the benchmark challenge used for a small container. Three interleaved runs each:
+  critical 98.7% against 98.6%, critical p99 123-135 ms against 129-135 ms, and the lower tiers
+  within noise. Not adopted. Every run in that batch passed both sanity checks (tier order and
+  request accounting).
 - **Hot path.** `Sieve.admit()` with two latency signals, 4 threads: about 1.9M admits/s before
   the signals became lock-free and cached, about 3.9M after (one thread: about 1.0M to 2.1M). That
   is about 0.5 microseconds per request, and it was never the bottleneck at the 600 rps used here.
@@ -352,13 +357,14 @@ prints a check that critical was never served less than another tier.
 
 - The backend is simulated and the machine is shared with the load generator.
 - The machine was shared with other work (a browser, other editor sessions and background
-  indexing used roughly one core's worth when I sampled it), and I did not record host state for
-  most runs. Late in the session the shed mode gave inconsistent critical success at the standard
+  indexing). With none of my processes running, the whole machine measured 18% to 37% busy over
+  six 5 second samples, about one core of four. I did not record host state for most runs. Late in the session the shed mode gave inconsistent critical success at the standard
   6x spike (99.1%, 90.4%) and in an overload search from 6x to 12x (63.6% to 80.7%), against 99.2%
   to 100% in two earlier batches. I could not establish the cause and do not report those as
   results. I first blamed load averages of 6 to 8, but those were mostly this benchmark's own
   load, so they are not evidence of interference. The harness's busy check was reworked for that
-  reason (see "Run the harness").
+  reason: the harness now samples CPU busy time instead (see "Run the harness"), and with a
+  15% limit it flags every run on this machine as noisy.
 - Latency figures depend on how much CPU the server has to itself (see "Controls"): unpinned runs
   and runs with the Prometheus and Grafana containers up differ by 2-3x in critical p50. Compare
   modes only within the same setup.

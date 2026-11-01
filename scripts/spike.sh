@@ -11,16 +11,23 @@ mode=${1:?usage: spike.sh noshed|limiter|shed}
 
 ./gradlew -q :sieve-demo:installDist :sieve-harness:compileGatlingJava || exit 1
 
-# Host load guard: a busy machine makes every number here unreliable. Wait up to
-# SIEVE_WAIT_QUIET seconds (default 90) for the 1 minute load average to drop below
-# SIEVE_MAX_LOAD (default 1.5), then run anyway and flag the result as noisy.
-load1() { cut -d' ' -f1 /proc/loadavg; }
-max_load=${SIEVE_MAX_LOAD:-1.5}
+# Busy check: a busy machine makes every number here unreliable. Measure how busy the whole machine
+# is over 3 seconds and, if it is above SIEVE_MAX_BUSY percent (default 15), wait up to
+# SIEVE_WAIT_QUIET seconds (default 90) for it to settle before starting; otherwise run anyway and
+# flag the result. (The load average is not used: it includes this script's own earlier runs.)
+cpu_busy() {
+  local u1 n1 s1 i1 w1 q1 sq1 u2 n2 s2 i2 w2 q2 sq2
+  read -r _ u1 n1 s1 i1 w1 q1 sq1 _ < /proc/stat; sleep "$1"
+  read -r _ u2 n2 s2 i2 w2 q2 sq2 _ < /proc/stat
+  awk -v b="$(( (u2+n2+s2+q2+sq2) - (u1+n1+s1+q1+sq1) ))" -v i="$(( (i2+w2) - (i1+w1) ))" \
+    'BEGIN { t = b + i; printf "%.0f", t ? 100 * b / t : 0 }'
+}
+max_busy=${SIEVE_MAX_BUSY:-15}
 waited=0
-while awk -v l="$(load1)" -v m="$max_load" 'BEGIN{exit !(l>m)}' && [ "$waited" -lt "${SIEVE_WAIT_QUIET:-90}" ]; do
-  sleep 5; waited=$((waited + 5))
+busy_before=$(cpu_busy 3)
+while [ "$busy_before" -gt "$max_busy" ] && [ "$waited" -lt "${SIEVE_WAIT_QUIET:-90}" ]; do
+  waited=$((waited + 3)); busy_before=$(cpu_busy 3)
 done
-load_before=$(load1)
 mkdir -p build
 server_pin=""; load_pin=""; gradle_flags=""
 if [ -n "${SIEVE_PIN:-}" ]; then
@@ -36,7 +43,5 @@ sleep 3
 $load_pin ./gradlew $gradle_flags -q :sieve-harness:gatlingRun --simulation dev.sieve.harness.SpikeSimulation > "build/gatling-$mode.log" 2>&1 \
   || { echo "gatling failed, see build/gatling-$mode.log"; exit 1; }
 curl -s localhost:8080/metrics > "build/metrics-$mode.txt"
-load_after=$(load1)
-python3 scripts/summarize.py "$mode"
-noisy=$(awk -v a="$load_before" -v b="$load_after" -v m="$max_load" 'BEGIN{print (a>m || b>m) ? "NOISY" : "quiet"}')
-echo "host load average (1 min): before $load_before, after $load_after, limit $max_load: $noisy"
+noisy=$([ "$busy_before" -gt "$max_busy" ] && echo "NOISY" || echo "quiet")
+echo "host CPU busy before the run: ${busy_before}% (limit ${max_busy}%): $noisy"
