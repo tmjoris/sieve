@@ -78,6 +78,14 @@ final class Metrics {
 
     String render() {
         StringBuilder sb = new StringBuilder();
+        var os = (com.sun.management.OperatingSystemMXBean)
+                java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        sb.append("# TYPE jvm_available_processors gauge\njvm_available_processors ")
+                .append(os.getAvailableProcessors()).append('\n');
+        sb.append("# TYPE jvm_process_cpu_load gauge\njvm_process_cpu_load ")
+                .append(os.getProcessCpuLoad()).append('\n');
+        sb.append("# TYPE jvm_system_cpu_load gauge\njvm_system_cpu_load ")
+                .append(os.getCpuLoad()).append('\n');
         sb.append("# TYPE sieve_requests_arrived_total counter\n");
         for (Priority p : Priority.values()) {
             sb.append("sieve_requests_arrived_total{tier=\"").append(p.id()).append("\"} ")
