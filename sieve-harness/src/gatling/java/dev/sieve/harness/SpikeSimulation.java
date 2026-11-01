@@ -20,7 +20,7 @@ import java.util.List;
  * request, so the Gatling report's success rate per request name is the availability per tier.
  *
  * <p>Environment: SIEVE_TARGET (default http://localhost:8080), SIEVE_BASE_RPS (100),
- * SIEVE_PEAK_MULT (6).
+ * SIEVE_PEAK_MULT (6), SIEVE_HOLD_S (30).
  */
 public class SpikeSimulation extends Simulation {
 
@@ -31,7 +31,7 @@ public class SpikeSimulation extends Simulation {
     private static final int WARMUP_S = 15;
     private static final int BASELINE_S = 20;
     private static final int RAMP_S = 15;
-    private static final int HOLD_S = 30;
+    private static final int HOLD_S = Integer.parseInt(env("SIEVE_HOLD_S", "30"));
     private static final int RAMPDOWN_S = 10;
     private static final int RECOVER_S = 20;
 

@@ -59,9 +59,34 @@ public final class DemoServer implements AutoCloseable {
         String mode = args.length < 1 ? "shed" : args[0];
         int port = args.length > 1 ? Integer.parseInt(args[1]) : 8080;
         ServerConfig c = ServerConfig.fromEnv(mode, port);
+        String warm = System.getenv("SIEVE_WARMUP_S");
+        if (warm != null && Integer.parseInt(warm) > 0) {
+            warmUp(c, Integer.parseInt(warm));
+        }
         start(c);
         System.out.println("listening on " + port + " mode=" + mode + " backend=" + c.backend()
                 + " capacity~" + (c.workers() * 1000 / c.serviceMs()) + "rps");
+    }
+
+    /**
+     * Serve a short synthetic load on a throwaway instance before the real port opens, so the JIT
+     * has compiled the request path when real traffic arrives. Without this the first seconds are
+     * slow, the latency signals read high, and the lower tiers are shed. The throwaway server is
+     * discarded, so its samples do not leak into the real one's signals or metrics.
+     */
+    static void warmUp(ServerConfig c, int seconds) {
+        try (DemoServer s = start(c.withPort(0))) {
+            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                    .executor(Executors.newVirtualThreadPerTaskExecutor()).build();
+            LoadProbe.run(client, s.port(), 150, seconds, "none");
+            LoadProbe.run(client, s.port(), 400, 1, "none"); // overload, to warm the shed paths
+        } catch (Exception e) {
+            System.err.println("warm-up failed: " + e);
+        }
+    }
+
+    int port() {
+        return server.getAddress().getPort();
     }
 
     static DemoServer start(ServerConfig c) throws IOException {

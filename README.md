@@ -158,8 +158,9 @@ limits, hot path), the Grafana screenshots and the table of ideas I tried and re
 
 ## Known issues
 
-- During JVM warm-up the first requests are slow, so the lower tiers are shed heavily for a few
-  seconds. Critical is not.
+- During JVM warm-up the first requests are slow, so the lower tiers are shed for a few seconds
+  (critical is not). The demo can warm up before serving (`SIEVE_WARMUP_S`), which cut that from
+  12 to 23% of lower-tier requests to about 2%.
 - The CPU curve starts shedding critical requests at 80% CPU by design.
 - The tuner found no configuration better than the defaults on this backend.
 - There is no Spring Boot demo application; the Spring module is covered by unit and end to end

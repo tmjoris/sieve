@@ -177,6 +177,8 @@ prints a check that critical was never served less than another tier.
 | System wide CPU signal | Critical 79-96% depending on what else ran on the machine | `CpuSignal.process()` added: 100%; Spring default stays `system` to match autoscalers |
 | Lock held on every signal read | 1.9M admits/s on 4 threads | Lock free and cached: 3.9M |
 | io_uring | Not measured; syscall cost is negligible at these rates | Not pursued |
+| `admit()` allocated on every call | 125 to 152 bytes per admit and success, 48 bytes per curve shed, 128 per limiter shed | Cached the priority id and the shed results: about 59 to 96, 0 and 32 bytes |
+| Cold start sheds lower tiers | First 6 s at half capacity: degraded 88%, best-effort 84%, bulk 77% success | Optional warm-up before opening the port (`SIEVE_WARMUP_S`): 98%, 97%, 98% |
 
 ### Limitations
 

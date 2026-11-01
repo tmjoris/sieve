@@ -19,6 +19,9 @@ on:
       contention:
         description: Busy loops to run on the server's cores (needs pin)
         default: "0"
+      hold_s:
+        description: Seconds to hold the peak (300 for a soak test)
+        default: "30"
 
 permissions:
   contents: read
@@ -52,6 +55,7 @@ jobs:
           ROUNDS: ${{ inputs.rounds }}
           MODES: ${{ inputs.modes }}
           SIEVE_CONTENTION: ${{ inputs.contention }}
+          SIEVE_HOLD_S: ${{ inputs.hold_s }}
         run: |
           mkdir -p results
           for r in $(seq 1 "$ROUNDS"); do
