@@ -56,8 +56,16 @@ public final class LatencySloSignal implements UtilizationSignal {
 
     /** 10 buckets over 5 seconds, at least 20 samples, refreshed every 50 ms, real clock. */
     public static LatencySloSignal of(java.time.Duration slo) {
+        return of(slo, java.time.Duration.ofSeconds(5));
+    }
+
+    /**
+     * Same, over a window of your choice. A short window forgets a one off stall quickly but
+     * is noisier; a long one smooths noise but keeps shedding for the whole window after a stall.
+     */
+    public static LatencySloSignal of(java.time.Duration slo, java.time.Duration window) {
         return new LatencySloSignal(
-                slo.toNanos(), 5_000_000_000L, 10, 20, 50_000_000L, System::nanoTime);
+                slo.toNanos(), window.toNanos(), 10, 20, 50_000_000L, System::nanoTime);
     }
 
     /** Record one finished request. Pass a very large latency for failures and timeouts. */

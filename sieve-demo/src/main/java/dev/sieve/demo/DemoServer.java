@@ -42,6 +42,12 @@ import java.util.concurrent.Semaphore;
  */
 public final class DemoServer implements AutoCloseable {
 
+    /**
+     * Test hook: SIEVE_STALL_MS and SIEVE_STALL_EVERY_S freeze request processing for that long,
+     * that often, like a GC pause or a CPU starvation burst would.
+     */
+    static volatile long stallUntilNanos;
+
     private final HttpServer server;
     private final ExecutorService executor;
     private final CpuSignal cpu;
@@ -105,10 +111,12 @@ public final class DemoServer implements AutoCloseable {
                 // SIEVE_LATENCY=0 turns latency shedding off, to test the CPU signal alone.
                 if (!"0".equals(System.getenv("SIEVE_LATENCY"))) {
                     // Target: shed lower tiers, never critical, as requests pass the SLO.
-                    b.latencySlo(LatencySloSignal.of(Duration.ofMillis(c.targetMs())),
+                    Duration window = Duration.ofMillis(Long.parseLong(
+                            System.getenv().getOrDefault("SIEVE_SIGNAL_WINDOW_MS", "5000")));
+                    b.latencySlo(LatencySloSignal.of(Duration.ofMillis(c.targetMs()), window),
                             ShedCurve.prioritized(c.targetLo(), c.targetHi()));
                     // Max: when requests approach timing out, shed everything.
-                    b.latencySlo(LatencySloSignal.of(Duration.ofMillis(c.maxMs())),
+                    b.latencySlo(LatencySloSignal.of(Duration.ofMillis(c.maxMs()), window),
                             ShedCurve.unprioritized(c.maxLo(), c.maxHi()));
                 }
                 if (c.cpuAutoscaleTarget() != null) {
@@ -145,6 +153,22 @@ public final class DemoServer implements AutoCloseable {
             ex.close();
         });
         server.start();
+        String stallMs = System.getenv("SIEVE_STALL_MS");
+        if (stallMs != null && Integer.parseInt(stallMs) > 0) {
+            long every = Long.parseLong(System.getenv().getOrDefault("SIEVE_STALL_EVERY_S", "8"));
+            Thread t = new Thread(() -> {
+                try {
+                    while (true) {
+                        Thread.sleep(every * 1000);
+                        stallUntilNanos = System.nanoTime() + Long.parseLong(stallMs) * 1_000_000L;
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "sieve-stall-injector");
+            t.setDaemon(true);
+            t.start();
+        }
         return new DemoServer(server, executor, cpu, metrics, c);
     }
 
@@ -234,6 +258,10 @@ public final class DemoServer implements AutoCloseable {
         }
 
         try {
+            long stall = stallUntilNanos - System.nanoTime();
+            if (stall > 0) {
+                Thread.sleep(stall / 1_000_000L, (int) (stall % 1_000_000L));
+            }
             workers.acquire();
             try {
                 work(c);
