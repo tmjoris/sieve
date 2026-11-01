@@ -36,6 +36,27 @@ What this shows:
   but that gap did not survive a fairer comparison; see "Controls" below.
 - The tuned thresholds are not distinguishable from the hand-picked defaults on goodput.
 
+### Static limit baseline
+
+A bounded queue that fails fast when full is the usual way to shed load, so I compared against one:
+a single static concurrency limit with no priorities (`fixed` mode). Two rounds per limit, with the
+adaptive limiter and full Sieve as controls from the same batch.
+
+| Mode | Critical success | Other tiers' success | p50 / p99 | Little's law: limit / 200 req/s |
+|---|---|---|---|---|
+| Static limit 8 | 49.2% | 48 to 51% | 35 / 53 ms | 40 ms |
+| Static limit 32 | 50.0% | 48 to 50% | 143 / 210 ms | 160 ms |
+| Static limit 128 | 49.3% | 48 to 50% | 660 / 805 ms | 640 ms |
+| Adaptive limiter | 99.8% | 35 to 39% | 64 / 87 ms | |
+| Sieve (shed curves + limiter) | 98.9% | 40 / 20 / 18% | 22 / 133 ms | |
+
+Total goodput is the same in every row (about half of the offered load, which is what the backend
+can serve). A static limit only changes how long the admitted requests wait, and the wait follows
+Little's law almost exactly: limit divided by capacity, so 8, 32 and 128 give about 40, 160 and
+640 ms. The limit has to be picked by hand for the backend, and it gives every tier the same share.
+The adaptive limiter finds a good operating point without being told, and the priorities decide who
+gets the capacity.
+
 ### Dashboards
 
 Prometheus and Grafana (`monitoring/`, `docker compose up -d`) with a provisioned dashboard.
