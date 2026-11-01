@@ -351,14 +351,14 @@ prints a check that critical was never served less than another tier.
 ### Limitations
 
 - The backend is simulated and the machine is shared with the load generator.
-- The machine was shared with other work. Load averages of 6 to 8 on 4 cores were seen late in
-  the session, and the harness records host load only from then on, so earlier batches may carry
-  interference that I cannot rule out. Interleaving and repeats reduce it without removing it.
-  An overload search from 6x to 12x taken under that load gave shed mode critical success of
-  63.6% to 80.7% and limiter-only 49.9% to 99.6%, and two reruns of the standard 6x spike gave
-  99.1% and 90.4%. I do not report those as results. Mixed rounds like this suggest the latency
-  thresholds may be more sensitive to a noisy host than the concurrency limiter, but I have not
-  tested that.
+- The machine was shared with other work (a browser, other editor sessions and background
+  indexing used roughly one core's worth when I sampled it), and I did not record host state for
+  most runs. Late in the session the shed mode gave inconsistent critical success at the standard
+  6x spike (99.1%, 90.4%) and in an overload search from 6x to 12x (63.6% to 80.7%), against 99.2%
+  to 100% in two earlier batches. I could not establish the cause and do not report those as
+  results. I first blamed load averages of 6 to 8, but those were mostly this benchmark's own
+  load, so they are not evidence of interference. The harness's busy check was reworked for that
+  reason (see "Run the harness").
 - Latency figures depend on how much CPU the server has to itself (see "Controls"): unpinned runs
   and runs with the Prometheus and Grafana containers up differ by 2-3x in critical p50. Compare
   modes only within the same setup.
