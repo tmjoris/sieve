@@ -69,4 +69,18 @@ class SieveAutoConfigurationTest {
                     assertTrue(ctx.getBean(Sieve.class) != null);
                 });
     }
+
+    @Test
+    void bindsTierPolicyAlgorithmAndWindow() {
+        runner.withPropertyValues("sieve.tiers=graded", "sieve.critical-floor=8",
+                "sieve.limit-algorithm=vegas", "sieve.signal-window=2s",
+                "sieve.latency-target=60ms").run(ctx -> {
+                    SieveProperties p = ctx.getBean(SieveProperties.class);
+                    assertEquals("graded", p.getTiers());
+                    assertEquals(8, p.getCriticalFloor());
+                    assertEquals("vegas", p.getLimitAlgorithm());
+                    assertEquals(2, p.getSignalWindow().toSeconds());
+                    assertTrue(ctx.getBean(Sieve.class) != null);
+                });
+    }
 }

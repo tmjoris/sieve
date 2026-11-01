@@ -1,6 +1,10 @@
 package dev.sieve.spring;
 
+import com.netflix.concurrency.limits.Limit;
+import com.netflix.concurrency.limits.limit.Gradient2Limit;
 import dev.sieve.CpuSignal;
+import dev.sieve.Limits;
+import dev.sieve.TierPolicy;
 import dev.sieve.LatencySloSignal;
 import dev.sieve.PriorityLimiter;
 import dev.sieve.ShedCurve;
@@ -27,17 +31,25 @@ public class SieveAutoConfiguration {
     @ConditionalOnMissingBean
     public Sieve sieve(SieveProperties p) {
         TierShares shares = TierShares.criticalFirst();
-        PriorityLimiter limiter = p.isWindowed()
-                ? PriorityLimiter.withWindowedGradient2(
-                        shares, p.getInitialLimit(), p.getMinLimit(), p.getMaxLimit())
-                : PriorityLimiter.withGradient2(
-                        shares, p.getInitialLimit(), p.getMinLimit(), p.getMaxLimit());
+        TierPolicy policy = "graded".equalsIgnoreCase(p.getTiers())
+                ? TierPolicy.graded() : TierPolicy.none();
+        policy = policy.withCriticalFloor(p.getCriticalFloor());
+        Limit limit;
+        if ("vegas".equalsIgnoreCase(p.getLimitAlgorithm())) {
+            limit = Limits.windowedVegas(p.getInitialLimit(), p.getMaxLimit());
+        } else if (p.isWindowed()) {
+            limit = Limits.windowedGradient2(p.getInitialLimit(), p.getMinLimit(), p.getMaxLimit());
+        } else {
+            limit = Gradient2Limit.newBuilder().initialLimit(p.getInitialLimit())
+                    .minLimit(p.getMinLimit()).maxConcurrency(p.getMaxLimit()).build();
+        }
+        PriorityLimiter limiter = new PriorityLimiter(limit, shares, policy);
         Sieve.Builder b = Sieve.builder(limiter);
         if (p.getLatencyTarget() != null) {
-            b.latencySlo(LatencySloSignal.of(p.getLatencyTarget()), ShedCurve.prioritized(0.10, 0.40));
+            b.latencySlo(LatencySloSignal.of(p.getLatencyTarget(), p.getSignalWindow()), ShedCurve.prioritized(0.10, 0.40));
         }
         if (p.getLatencyMax() != null) {
-            b.latencySlo(LatencySloSignal.of(p.getLatencyMax()), ShedCurve.unprioritized(0.10, 0.40));
+            b.latencySlo(LatencySloSignal.of(p.getLatencyMax(), p.getSignalWindow()), ShedCurve.unprioritized(0.10, 0.40));
         }
         if (p.getCpuAutoscaleTarget() != null) {
             CpuSignal cpu = "process".equalsIgnoreCase(p.getCpuScope())

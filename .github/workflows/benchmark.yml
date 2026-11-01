@@ -28,6 +28,11 @@ on:
       extra_env:
         description: Extra settings, space separated KEY=VALUE (for example SIEVE_LIMIT_ALGO=vegas)
         default: ""
+      arms:
+        description: >
+          Optional configurations run interleaved inside every round, as name=KEY=VAL,KEY=VAL
+          entries separated by semicolons, for example "base=;graded=SIEVE_TIERS=graded"
+        default: ""
 
 permissions:
   contents: read
@@ -64,15 +69,22 @@ jobs:
           SIEVE_HOLD_S: ${{ inputs.hold_s }}
           SIEVE_PEAK_MULT: ${{ inputs.peak_mult }}
           EXTRA_ENV: ${{ inputs.extra_env }}
+          ARMS: ${{ inputs.arms }}
         run: |
           mkdir -p results
           for kv in $EXTRA_ENV; do export "$kv"; done
-          echo "settings: $EXTRA_ENV peak ${SIEVE_PEAK_MULT}x hold ${SIEVE_HOLD_S}s pin=${SIEVE_PIN:-no}" > results/ci-spike.txt
+          echo "settings: $EXTRA_ENV peak ${SIEVE_PEAK_MULT}x hold ${SIEVE_HOLD_S}s pin=${SIEVE_PIN:-no} arms=${ARMS:-none}" > results/ci-spike.txt
+          [ -z "$ARMS" ] && ARMS="default="
+          IFS=';' read -ra ARM_LIST <<< "$ARMS"
           for r in $(seq 1 "$ROUNDS"); do
-            for m in $MODES; do
-              echo "=== round $r $m" >> results/ci-spike.txt
-              scripts/spike.sh "$m" >> results/ci-spike.txt 2>&1 \
-                || echo "run failed: $m" >> results/ci-spike.txt
+            for arm in "${ARM_LIST[@]}"; do
+              name="${arm%%=*}"; settings="${arm#*=}"
+              for m in $MODES; do
+                echo "=== round $r arm=$name $m" >> results/ci-spike.txt
+                ( for kv in ${settings//,/ }; do export "$kv"; done
+                  scripts/spike.sh "$m" >> results/ci-spike.txt 2>&1 ) \
+                  || echo "run failed: $name $m" >> results/ci-spike.txt
+              done
             done
           done
       - name: Summary

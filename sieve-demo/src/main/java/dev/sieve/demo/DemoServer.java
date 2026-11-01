@@ -197,6 +197,13 @@ public final class DemoServer implements AutoCloseable {
                                 .maxConcurrency(c.maxLimit()).build();
         TierPolicy policy = "graded".equals(System.getenv("SIEVE_TIERS"))
                 ? TierPolicy.graded() : TierPolicy.none();
+        // SIEVE_TIER_THRESHOLDS="1.0,0.85,0.70,0.50" overrides the graded fractions of the limit
+        // (critical, degraded, best-effort, bulk).
+        String custom = System.getenv("SIEVE_TIER_THRESHOLDS");
+        if (custom != null) {
+            policy = new TierPolicy(
+                    java.util.Arrays.stream(custom.split(",")).mapToDouble(Double::parseDouble).toArray(), 0);
+        }
         String floor = System.getenv("SIEVE_CRITICAL_FLOOR");
         if (floor != null) {
             policy = policy.withCriticalFloor(Integer.parseInt(floor));
