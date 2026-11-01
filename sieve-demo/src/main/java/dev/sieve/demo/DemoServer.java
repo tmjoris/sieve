@@ -14,6 +14,10 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import com.netflix.concurrency.limits.Limiter;
+import com.netflix.concurrency.limits.limit.FixedLimit;
+import com.netflix.concurrency.limits.limiter.SimpleLimiter;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
@@ -23,10 +27,12 @@ import java.util.concurrent.Semaphore;
  * {@code serviceMs}. Capacity is workers * 1000 / serviceMs requests per second. Excess requests
  * queue for a slot, so latency climbs under overload unless Sieve sheds.
  *
- * <p>Usage: DemoServer [noshed|limiter|shed] [port]; see {@link ServerConfig#fromEnv} for the
+ * <p>Usage: DemoServer [noshed|fixed|limiter|shed] [port]; see {@link ServerConfig#fromEnv} for the
  * SIEVE_* environment variables.
  * <ul>
  *   <li>noshed: no protection at all
+ *   <li>fixed: one static concurrency limit (SIEVE_FIXED_LIMIT, default 32) and no priorities, like
+ *       a bounded request queue that fails fast when full
  *   <li>limiter: only the partitioned adaptive concurrency limit
  *   <li>shed: shed curves on target and max latency (and CPU if SIEVE_CPU_TARGET is set), plus
  *       the limiter as backstop
@@ -61,7 +67,7 @@ public final class DemoServer implements AutoCloseable {
     static DemoServer start(ServerConfig c) throws IOException {
         CpuSignal cpu = null;
         Sieve sieve = switch (c.mode()) {
-            case "noshed" -> null;
+            case "noshed", "fixed" -> null;
             case "limiter" -> Sieve.builder(limiter(c)).build();
             case "shed" -> {
                 Sieve.Builder b = Sieve.builder(limiter(c));
@@ -82,9 +88,14 @@ public final class DemoServer implements AutoCloseable {
                 }
                 yield b.build();
             }
-            default -> throw new IllegalArgumentException("mode: noshed|limiter|shed");
+            default -> throw new IllegalArgumentException("mode: noshed|fixed|limiter|shed");
         };
 
+        Limiter<Void> fixed = c.mode().equals("fixed")
+                ? SimpleLimiter.newBuilder().limit(FixedLimit.of(
+                        System.getenv("SIEVE_FIXED_LIMIT") == null ? 32
+                                : Integer.parseInt(System.getenv("SIEVE_FIXED_LIMIT")))).build()
+                : null;
         Semaphore workers = new Semaphore(c.workers());
         Metrics metrics = new Metrics();
         // CPU-burning handlers must not run on virtual threads: they would pin the carriers.
@@ -93,7 +104,7 @@ public final class DemoServer implements AutoCloseable {
 
         HttpServer server = HttpServer.create(new InetSocketAddress(c.port()), 4096);
         server.setExecutor(executor);
-        server.createContext("/work", ex -> handle(ex, c, sieve, workers, metrics));
+        server.createContext("/work", ex -> handle(ex, c, sieve, fixed, workers, metrics));
         server.createContext("/metrics", ex -> {
             byte[] body = metrics.render().getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().add("Content-Type", "text/plain; version=0.0.4");
@@ -137,15 +148,30 @@ public final class DemoServer implements AutoCloseable {
         }
     }
 
-    private static void handle(HttpExchange ex, ServerConfig c, Sieve sieve, Semaphore workers,
-            Metrics metrics) throws IOException {
+    private static void handle(HttpExchange ex, ServerConfig c, Sieve sieve,
+            Limiter<Void> fixed, Semaphore workers, Metrics metrics) throws IOException {
         Priority priority = Priority.parse(ex.getRequestHeaders().getFirst(Priority.HEADER))
                 .orElse(Priority.BEST_EFFORT);
 
         long start = System.nanoTime();
         metrics.arrived(priority);
         Admission.Permit permit = null;
-        if (sieve != null) {
+        if (fixed != null) {
+            Optional<Limiter.Listener> l = fixed.acquire(null);
+            if (l.isEmpty()) {
+                metrics.count(priority, Metrics.Outcome.SHED_LIMIT);
+                ex.getResponseHeaders().add("Retry-After", "1");
+                ex.sendResponseHeaders(503, -1);
+                ex.close();
+                return;
+            }
+            Limiter.Listener listener = l.get();
+            permit = new Admission.Permit() {
+                public void success() { listener.onSuccess(); }
+                public void dropped() { listener.onDropped(); }
+                public void ignore() { listener.onIgnore(); }
+            };
+        } else if (sieve != null) {
             switch (sieve.admit(priority)) {
                 case Admission.Shed shed -> {
                     metrics.count(priority, shed.reason() == Admission.Reason.UTILIZATION

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Run the Gatling spike against the demo server in one mode and print per-tier results.
-# usage: scripts/spike.sh noshed|limiter|shed
+# usage: scripts/spike.sh noshed|fixed|limiter|shed   (fixed: SIEVE_FIXED_LIMIT, default 32)
 # SIEVE_SERVER_JVM sets JVM flags for the server only (e.g. "-XX:+UseSerialGC -Xmx512m").
 # Set SIEVE_PIN=1 to pin the server and the load generator to separate cores (defaults: server
 # on 0,1 and Gatling on 2,3; override with SIEVE_SERVER_CPUS / SIEVE_LOAD_CPUS). That removes the
 # main source of run-to-run noise on a small machine.
 set -u
 cd "$(dirname "$0")/.."
-mode=${1:?usage: spike.sh noshed|limiter|shed}
+mode=${1:?usage: spike.sh noshed|fixed|limiter|shed}
 
 ./gradlew -q :sieve-demo:installDist :sieve-harness:compileGatlingJava || exit 1
 
