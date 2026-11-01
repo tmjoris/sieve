@@ -33,14 +33,29 @@ public final class Sieve {
         return new Builder(limiter);
     }
 
+    /**
+     * Shed results are immutable and there are only a few, so they are built once. Shedding is the
+     * path that runs hardest under overload, and it should not allocate.
+     */
+    private static final Admission.Shed[] SHED_UTILIZATION = shed(Admission.Reason.UTILIZATION);
+    private static final Admission.Shed[] SHED_LIMIT = shed(Admission.Reason.CONCURRENCY_LIMIT);
+
+    private static Admission.Shed[] shed(Admission.Reason reason) {
+        Priority[] all = Priority.values();
+        Admission.Shed[] out = new Admission.Shed[all.length];
+        for (Priority p : all) {
+            out[p.ordinal()] = new Admission.Shed(p, reason, retryAfter(p));
+        }
+        return out;
+    }
+
     public Admission admit(Priority priority) {
         if (policy.shouldShed(priority, random.getAsDouble())) {
-            return new Admission.Shed(priority, Admission.Reason.UTILIZATION, retryAfter(priority));
+            return SHED_UTILIZATION[priority.ordinal()];
         }
         Optional<Limiter.Listener> listener = limiter.acquire(priority);
         if (listener.isEmpty()) {
-            return new Admission.Shed(
-                    priority, Admission.Reason.CONCURRENCY_LIMIT, retryAfter(priority));
+            return SHED_LIMIT[priority.ordinal()];
         }
         return new Admission.Admitted(new TrackedPermit(listener.get()));
     }

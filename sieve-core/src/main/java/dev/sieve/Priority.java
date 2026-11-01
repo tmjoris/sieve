@@ -10,10 +10,13 @@ public enum Priority {
     BEST_EFFORT,
     BULK;
 
+    private final String id = name().toLowerCase(Locale.ROOT);
+
     public static final String HEADER = "X-Sieve-Priority";
 
+    /** Lower case name, computed once: the limiter looks it up on every request. */
     public String id() {
-        return name().toLowerCase(Locale.ROOT);
+        return id;
     }
 
     public static Optional<Priority> parse(String value) {
