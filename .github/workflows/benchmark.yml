@@ -1,0 +1,75 @@
+name: Benchmark
+
+# Runs the Gatling spike against the demo server on a GitHub runner, in all three modes, and
+# fails if a sanity check fails (critical served less than another tier, or requests unaccounted
+# for). It does not gate on absolute numbers: a shared runner is noisy. Start it by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Rounds per mode
+        default: "2"
+      pin:
+        description: Pin the server and the load generator to separate cores
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Build
+        run: ./gradlew -q :sieve-demo:installDist :sieve-harness:compileGatlingJava
+      - name: Runner
+        run: |
+          {
+            echo '```'
+            echo "cpus: $(nproc)"
+            lscpu | grep -E 'Model name'
+            free -g | head -2
+            java -version 2>&1 | head -1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Run spikes
+        env:
+          SIEVE_PIN: ${{ inputs.pin == true && '1' || '' }}
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          mkdir -p results
+          for r in $(seq 1 "$ROUNDS"); do
+            for m in noshed limiter shed; do
+              echo "=== round $r $m" >> results/ci-spike.txt
+              scripts/spike.sh "$m" >> results/ci-spike.txt 2>&1 \
+                || echo "run failed: $m" >> results/ci-spike.txt
+            done
+          done
+      - name: Summary
+        if: always()
+        run: |
+          { echo '```'; cat results/ci-spike.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Evidence bundle
+        if: always()
+        run: scripts/archive-evidence.sh "ci-${GITHUB_RUN_ID}"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            results/
+            docs/evidence/ci-*.tar.gz
+      - name: Check invariants
+        run: |
+          if grep -E "MISMATCH|VIOLATED|run failed" results/ci-spike.txt; then
+            echo "a sanity check failed"; exit 1
+          fi

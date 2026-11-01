@@ -1,5 +1,7 @@
 # Sieve
 
+[![CI](https://github.com/tmjoris/sieve/actions/workflows/ci.yml/badge.svg)](https://github.com/tmjoris/sieve/actions/workflows/ci.yml)
+
 Prioritized load shedding for Java 21 services, built on Netflix's
 [`concurrency-limits`](https://github.com/Netflix/concurrency-limits).
 
@@ -42,6 +44,11 @@ git clone https://github.com/tmjoris/sieve.git && cd sieve
 ./gradlew build                 # needs JDK 21
 scripts/spike.sh shed           # Gatling spike against the demo server, per tier results
 ```
+
+The scripts need Python 3 and `curl`; Docker is only needed for the Prometheus and Grafana stack
+in `monitoring/`. Other scripts: `scripts/retry-storm.sh`, `scripts/overload-search.sh`,
+`scripts/archive-evidence.sh`, and the `Tuner` in `sieve-demo`. Every `SIEVE_*` setting is listed
+in [docs/configuration.md](docs/configuration.md).
 
 ## Modules
 
@@ -118,272 +125,42 @@ retries are dropped first. The server's hints do part of the work: critical requ
 `Retry-After: 0` and retry at once with jitter, while degraded, best-effort and bulk are told 2 s,
 5 s and 10 s, which is longer than the client's 1 s limit, so they are not retried.
 
-## Requirements
-
-- JDK 21. The Gradle wrapper downloads Gradle on first use.
-- To run the harness scripts: Python 3 (for the summaries) and `curl`. `taskset` is optional
-  (core pinning). Docker is only needed for the Prometheus and Grafana stack.
-
-## Build and test
-
-```bash
-git clone https://github.com/tmjoris/sieve.git
-cd sieve
-./gradlew build
-```
-
-## Run the demo
-
-The demo is a small HTTP server with a simulated backend that can serve about 200 requests per
-second (4 workers, 20 ms per request). `LoadProbe` sends load at a fixed rate with a mix of
-20% critical, 30% degraded, 30% best-effort and 20% bulk, and prints success rate and latency
-per tier.
-
-```bash
-./gradlew :sieve-demo:installDist
-BIN=sieve-demo/build/install/sieve-demo/bin/sieve-demo
-CP="sieve-demo/build/install/sieve-demo/lib/*"
-
-# The first phase doubles as JVM warm-up, so ignore it (see "Known issues").
-RATES=100,100,200,400,800
-
-# 1. Baseline, no protection
-$BIN noshed 8080 &
-java -cp "$CP" dev.sieve.demo.LoadProbe 8080 $RATES 6
-kill %1
-
-# 2. Adaptive concurrency limit only
-$BIN limiter 8080 &
-java -cp "$CP" dev.sieve.demo.LoadProbe 8080 $RATES 6
-kill %1
-
-# 3. Shed curve on latency-SLO utilization, plus the limiter as backstop
-$BIN shed 8080 &
-java -cp "$CP" dev.sieve.demo.LoadProbe 8080 $RATES 6
-kill %1
-```
-
-`LoadProbe` arguments are the port, a comma-separated list of request rates (one phase each),
-the seconds per phase, and optionally a client retry mode: `none` (default), `naive` or `budget`.
-Clients choose a tier with the `X-Sieve-Priority` header (`critical`, `degraded`, `best_effort`,
-`bulk`); requests without it are treated as best-effort. Shed requests get a `503` with
-`Retry-After` of 0, 2, 5 or 10 seconds for critical, degraded, best-effort and bulk.
-
-The demo server reads `SIEVE_*` environment variables: `SIEVE_BACKEND=cpu` burns CPU instead of
-sleeping, `SIEVE_WORKERS`, `SIEVE_SERVICE_MS`, `SIEVE_CPU_TARGET` (adds the CPU signal),
-`SIEVE_CPU_SCOPE=process|system`, `SIEVE_LATENCY=0` (turn latency shedding off), the threshold
-settings `SIEVE_TARGET_MS`, `SIEVE_TARGET_LO`, `SIEVE_TARGET_HI`, `SIEVE_MAX_MS`, `SIEVE_MAX_LO`,
-`SIEVE_MAX_HI`, and the limiter settings `SIEVE_INITIAL_LIMIT`, `SIEVE_MIN_LIMIT`,
-`SIEVE_MAX_LIMIT`, `SIEVE_WINDOWED=0`.
-
-## Run the harness
-
-```bash
-scripts/spike.sh noshed|limiter|shed     # Gatling spike, per tier results and sanity checks
-scripts/retry-storm.sh shed 3            # none / naive / budget client retries, 3 runs each
-scripts/overload-search.sh shed 6 8 10   # same spike at larger peak multiples
-java -cp "sieve-demo/build/install/sieve-demo/lib/*" dev.sieve.demo.Tuner   # threshold tuner
-scripts/archive-evidence.sh my-label     # bundle raw results with an environment manifest
-(cd monitoring && docker compose up -d)  # Prometheus :9090 and Grafana :3000
-```
-
-`spike.sh` honours `SIEVE_PIN=1` (server on cores 0 and 1, Gatling on 2 and 3),
-`SIEVE_SERVER_JVM` (JVM flags for the server only), `SIEVE_PEAK_MULT` and `SIEVE_BASE_RPS`. Before
-each run it measures how busy the whole machine is over 3 seconds and, if that is above
-`SIEVE_MAX_BUSY` percent (default 15), waits up to `SIEVE_WAIT_QUIET` seconds (default 90) before
-running and flags the result as noisy. After each run it checks that critical was never served
-less than another tier, and that every arrived request is accounted for as served or shed.
-
 ## Results
 
-Everything below was measured on one 4-core machine against the demo backend, with the load
-generator on the same machine. The numbers show how the pieces behave relative to each other;
-they are not claims about production capacity. Read "Limitations" for how noisy that machine was.
+The 6x spike (100 to 600 requests per second, backend capacity about 200), three rounds per mode,
+interleaved. Success is the client view; a 503 or a timeout counts as a failure.
 
-### 6x spike (Gatling, `scripts/spike.sh`)
-
-100 rps baseline, ramp to 600 rps, hold 30 s, recover. The sleep-based backend serves about
-200 rps, so the peak is about 3x its capacity. Success is the client view (a 503 or a timeout is a
-failure). Latency is for served requests, estimated from the server's histogram. Three rounds per
-mode, interleaved to cancel drift. These runs predate the lock free signals and the critical
-`Retry-After` change listed under "Decisions". Two later batches of the shed mode gave critical
-99.2% to 100%, but three runs taken while the machine was heavily loaded gave 80.7%, 99.1% and
-90.4% (see "Limitations").
-
-| Mode | Critical success | Critical p50 / p99 | Degraded / best-effort / bulk success |
+| Mode | Critical success | Critical p50 / p99 | Degraded / best-effort / bulk |
 |---|---|---|---|
 | No protection | 20.4% | timeouts (5 s) | 20.5 / 20.4 / 20.4% |
-| Limiter only (windowed Gradient2) | 100% (3/3) | 68 / 99 ms | 36.5 / 35.6 / 39.5%, no ordering |
-| Shed curves + limiter, default thresholds | 99.4% (98.4-100) | 23 / 151-239 ms | 46.2 / 21.6 / 18.5%, ordered |
-| Shed curves + limiter, tuned thresholds | 100% (3/3) | 21 / 194-216 ms | 43.3 / 20.7 / 17.7%, ordered |
+| Limiter only (windowed Gradient2) | 100% (3/3) | 68 / 99 ms | 36.5 / 35.6 / 39.5%, no order |
+| Shed curves + limiter | 99.4% (98.4 to 100) | 23 / 151 to 239 ms | 46.2 / 21.6 / 18.5%, ordered |
 
-What this shows:
-
-- Without protection, every tier fails equally and latency runs into the client timeout.
-- The windowed adaptive limiter alone already keeps critical traffic available on this backend.
-- The shed curves add a real priority order among the lower tiers: degraded is served more than
-  best-effort, more than bulk. The limiter alone treats those three the same.
-- In these unpinned runs the curves also gave lower critical median latency (23 ms against 68 ms),
-  but that gap did not survive a fairer comparison; see "Controls" below.
-- The tuned thresholds are not distinguishable from the hand-picked defaults on goodput.
-
-### Dashboards
-
-Prometheus and Grafana (`monitoring/`, `docker compose up -d`) with a provisioned dashboard.
-The same spike, without protection and with Sieve:
-
-![Spike without protection](docs/grafana-noshed.png)
-
-Without protection, goodput is stuck at the backend's capacity while latency climbs to tens of
-seconds. The server keeps finishing a backlog of requests whose clients gave up after 5 s, which
-is why "availability" in the server's own view rises above 100% at the end; the client view in the
-table above is the real one.
-
-![Spike with Sieve](docs/grafana-shed.png)
-
-With Sieve, offered load reaches 600 req/s while goodput holds near capacity. All critical
-traffic (120 req/s) is served and the lower tiers absorb the shedding. The flat 100 ms p99 is the
-histogram's bucket boundary, not a measurement of exactly 100 ms.
-
-### Retry storms (`scripts/retry-storm.sh`)
-
-A sudden 600 rps for 10 s against the shedding server, with clients retrying three ways. "Load"
-is calls sent to the server per original request. Three runs each.
+And a retry storm (a sudden 600 rps for 10 s), three runs each:
 
 | Client retries | Critical success | Critical p99 | Degraded success | Load, degraded tier |
 |---|---|---|---|---|
 | None | 97.6% | 251 ms | 35.0% | 1.00x |
-| Naive: 2 immediate retries | 90.0% (87.5-93.6) | 2.7 s | 11.5% | 2.87x |
-| `RetryPolicy` (budget) | 99.4% (99.2-99.7) | 302 ms | 33.6% | 1.00x |
+| Two immediate retries | 90.0% | 2.7 s | 11.5% | 2.87x |
+| `RetryPolicy` (budget) | 99.4% | 302 ms | 33.6% | 1.00x |
 
-Naive retries make the overload worse: they nearly triple the load from the lower tiers and cost
-critical traffic availability. The retry budget adds 6% to the critical tier's calls and nothing measurable elsewhere, because
-the lower tiers' `Retry-After` hints (2-10 s) exceed the 1 s it is willing to wait.
+The CPU-bound backend, the threshold tuner, the control experiments (core pinning, limiter
+limits, hot path), the Grafana screenshots and the table of ideas I tried and rejected are in
+[docs/results.md](docs/results.md).
 
-Shed critical requests are told `Retry-After: 0` and the client's full-jitter backoff spreads
-them out. An earlier version told them to wait 1 s, which put the critical p99 at about 1.2 s; the
-change cut it to 0.3 s.
+## Limitations
 
-Against a server with no shedding, nothing helps (about 22% success whichever way clients retry),
-but naive retries still send 2.5x the calls.
-
-### CPU-bound backend
-
-The demo can burn CPU instead of sleeping (`SIEVE_BACKEND=cpu`). 4 spinning workers serve about
-200 rps; load goes from 50 to 300 rps. CPU is the only shedding signal, with a 50% autoscaling
-target (non-critical shedding from 60% CPU, critical from 80%). Two rounds per mode.
-
-| Mode | Critical success | Critical p99 | Degraded / best-effort / bulk success |
-|---|---|---|---|
-| No protection | 41% | timeouts (5 s) | 41 / 41 / 41% |
-| System-wide CPU (earlier batch) | 95.5-96.2% | 98-139 ms | 60 / 40 / 24% |
-| System-wide CPU (later batch) | 78.6-89.2% | 68-79 ms | 44 / 26 / 16% |
-| Process CPU (`CpuSignal.process()`) | 100% | 105 ms | 72.5 / 64.7 / 57.0% |
-
-System-wide CPU includes the load generator and anything else on the machine, so the same
-configuration gave 96% critical in one batch and 84% in another. Reading only this process's CPU
-removed that: critical was fully protected and the lower tiers kept much more of their traffic,
-because they were no longer shed for CPU the server did not use. On a shared machine, use
-`CpuSignal.process()`; where the signal must line up with an autoscaler that scales on instance
-CPU, use `system()` (Spring: `sieve.cpu-scope`).
-
-### Auto-tuner (`sieve-demo`, `Tuner`)
-
-Coordinate descent over the shedding thresholds, each trial a real server process under a real
-spike, averaged over two runs. The score requires critical success of at least 99% and p99 under
-400 ms, then rewards the weighted goodput of the other tiers. Two search runs agreed on the
-shape of the landscape:
-
-- A 40 ms latency target sheds too much (best-effort success falls to 2%).
-- A 90 ms target or looser admits more lower-tier traffic (17-20% each) but critical drops to
-  about 98% and the trial is rejected.
-- Around 60 ms the score is a plateau, so the tuned configuration (+8% score) did not validate as
-  better than the defaults in the full spike above.
-
-### Controls
-
-Checks run to see which results hold up, each against the same spike.
-
-- **Core pinning.** Server on cores 0-1 and Gatling on 2-3 (`SIEVE_PIN=1`). With both modes
-  pinned, critical p50 is 51-55 ms with shedding against 57-58 ms limiter-only, so the 3x latency
-  gap seen unpinned was the server having spare CPU, not the curves. Both keep critical at 100%.
-  What stays: the tier ordering (degraded 57% against 37% limiter-only, bulk 21% against 40%).
-  Pinning also tightened the tail: shed p99 was 84-97 ms against 151-239 ms unpinned.
-- **Limiter limits.** The library's own windowed Gradient2 limits (initial 20, minimum 20) against
-  the tight 10 / 4 used for this 4-worker backend: critical availability is the same (99.2% against
-  99.9%), limiter-only critical p50 is 100 ms against 60 ms, and degraded goodput under shedding is
-  36% against 48%. The defaults are acceptable; sizing the floor to the service buys latency and
-  lower-tier goodput, not critical availability.
-- **JVM flags.** Serial GC with a 128 to 768 MiB heap against the default JVM, as one Java
-  submission to the benchmark challenge used for a small container. Three interleaved runs each:
-  critical 98.7% against 98.6%, critical p99 123-135 ms against 129-135 ms, and the lower tiers
-  within noise. Not adopted. Every run in that batch passed both sanity checks (tier order and
-  request accounting).
-- **Hot path.** `Sieve.admit()` with two latency signals, 4 threads: about 1.9M admits/s before
-  the signals became lock-free and cached, about 3.9M after (one thread: about 1.0M to 2.1M). That
-  is about 0.5 microseconds per request, and it was never the bottleneck at the 600 rps used here.
-
-### What these results establish
-
-They establish how the pieces compare on one 4-core machine, at one baseline of 100 rps, against a
-simulated backend that serves about 200 rps: priority shedding keeps critical requests available
-under a 3x overload, orders the lower tiers, and a retry budget stops clients from amplifying it.
-
-They do not establish production capacity, behaviour over a real network, behaviour with a real
-downstream dependency, or a latency advantage for the curves over the limiter alone. Trial order
-was fixed within each round (not shuffled), so slow drift on the machine could favour a later arm.
-The tuned and default thresholds were not statistically separated.
-
-Raw per tier results, server metrics and a manifest of the environment (commit, JDK, kernel, CPU)
-are in `docs/evidence/`; `scripts/archive-evidence.sh` creates a new bundle. Each Gatling run also
-prints a check that critical was never served less than another tier.
-
-### Decisions and rejected ideas
-
-| Idea | What I measured | Decision |
-|---|---|---|
-| One latency threshold for every tier | Critical was shed at 87-90% success in the 400 rps phase | Replaced by a target threshold (lower tiers only) and a max threshold (everything) |
-| Bare Gradient2 limiter | Limiter-only critical success 79.6% | Wrapped in `WindowedLimit`: 99.9% |
-| Library limits (20 / 20) against tight limits (10 / 4) | Same critical availability; limiter-only critical p50 100 ms against 60 ms | Library keeps its defaults; the demo uses 10 / 4 |
-| 2 s signal window instead of 5 s | Cold start 71% against 16% critical, but 62% against 80% at 800 rps, one run each | Not adopted, inconclusive |
-| Probe fraction to break the low traffic latch | Not run: the latch is already bounded by the window, and a 1% probe cannot dilute stale samples faster | Rejected on reasoning |
-| Tuned thresholds | Score +8% in the tuner, not separable from defaults in the full spike | Defaults kept |
-| Critical `Retry-After` of 1 s | Retried critical p99 1.2 s | Changed to 0 with client jitter: 0.3 s |
-| System wide CPU signal | Critical 79-96% depending on what else ran on the machine | `CpuSignal.process()` added: 100%; Spring default stays `system` to match autoscalers |
-| Lock held on every signal read | 1.9M admits/s on 4 threads | Lock free and cached: 3.9M |
-| io_uring | Not measured; syscall cost is negligible at these rates | Not pursued |
-
-### Limitations
-
-- The backend is simulated and the machine is shared with the load generator.
-- The machine was shared with other work (a browser, other editor sessions and background
-  indexing). With none of my processes running, the whole machine measured 18% to 37% busy over
-  six 5 second samples, about one core of four. I did not record host state for most runs. Late in the session the shed mode gave inconsistent critical success at the standard
-  6x spike (99.1%, 90.4%) and in an overload search from 6x to 12x (63.6% to 80.7%), against 99.2%
-  to 100% in two earlier batches. I could not establish the cause and do not report those as
-  results. I first blamed load averages of 6 to 8, but those were mostly this benchmark's own
-  load, so they are not evidence of interference. The harness's busy check was reworked for that
-  reason: the harness now samples CPU busy time instead (see "Run the harness"), and with a
-  15% limit it flags every run on this machine as noisy.
-- Latency figures depend on how much CPU the server has to itself (see "Controls"): unpinned runs
-  and runs with the Prometheus and Grafana containers up differ by 2-3x in critical p50. Compare
-  modes only within the same setup.
-- Per-tier p99 comes from histogram buckets (1.25x steps in the latest version, coarser in the
-  runs in the first tables).
-- The limiter's tight floor and starting limit (4 and 10) are tuned to this 4-worker backend and
-  are not general defaults. The library's own defaults (20 and 20) are looser.
+- The backend is simulated and the load generator shares the machine. The numbers compare modes
+  against each other; they are not production capacity.
+- The machine was shared with other work, and a few runs gave lower critical success than the
+  table above. See [docs/results.md](docs/results.md#limitations) for what I found.
+- Trial order was fixed within each round, so slow drift could favour a later arm.
 
 ## Known issues
 
-- **Cold start.** During JVM warm-up the first requests are slow, so the lower tiers are shed
-  heavily for a few seconds (critical is not). If a service only ever receives low-priority
-  traffic, a burst of slow requests can keep the signal high until its 5 s window expires,
-  because shed requests produce no fresh samples.
-- Results vary between runs; one run proves little.
-- The latency thresholds may react to a noisy host by shedding more than they should, critical
-  traffic included. Seen once, under uncontrolled load; not tested.
-- The CPU curve starts shedding critical requests at 80% CPU by design, so a service that sits
-  above that for long periods loses some critical traffic.
+- During JVM warm-up the first requests are slow, so the lower tiers are shed heavily for a few
+  seconds. Critical is not.
+- The CPU curve starts shedding critical requests at 80% CPU by design.
 - The tuner found no configuration better than the defaults on this backend.
 - There is no Spring Boot demo application; the Spring module is covered by unit and end to end
   tests, and the benchmarks use a small JDK HTTP server.
@@ -420,11 +197,6 @@ Netflix engineering posts and talk this is based on:
 - [Enhancing Netflix Reliability with Service-Level Prioritized Load Shedding](https://netflixtechblog.com/enhancing-netflix-reliability-with-service-level-prioritized-load-shedding-e735e6ce8f7d) (2024): the four priority buckets, CPU and latency utilization, the 6x experiment.
 - [How Netflix handles sudden load spikes in the cloud](https://reinvent.awsevents.com/content/dam/reinvent/2024/slides/nfx/NFX301_How-Netflix-handles-sudden-load-spikes-in-the-cloud.pdf) (re:Invent 2024 slides): target versus max utilization, success and failure buffers, retry settings.
 - [Enhancing Reliability Using Service-Level Prioritized Load Shedding at Netflix](https://infoq.com/presentations/service-level-prioritized-load-shedding) (QCon SF 2025): shed-probability functions, success and failure buffers, auto-tuning, prioritized retry budget.
-
-The benchmarking approach (paired comparisons, archived raw evidence, stating what a result does
-not establish) follows the submissions to
-[twelve-dollar-server-challenge](https://github.com/arjaythedev/twelve-dollar-server-challenge),
-in particular pull request 82.
 
 ## License
 
