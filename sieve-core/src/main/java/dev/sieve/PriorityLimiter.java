@@ -6,22 +6,29 @@ import com.netflix.concurrency.limits.limit.Gradient2Limit;
 import com.netflix.concurrency.limits.limit.WindowedLimit;
 import com.netflix.concurrency.limits.limiter.AbstractPartitionedLimiter;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Per-tier adaptive concurrency limiting. Wraps Netflix's partitioned limiter: one adaptive
- * limit for the whole service, split into guaranteed shares per priority tier.
+ * limit for the whole service, split into guaranteed shares per priority tier. A
+ * {@link TierPolicy} can add graded thresholds (lower tiers give way earlier) and a reserved floor
+ * for critical requests.
  */
 public final class PriorityLimiter {
 
-    private final Limiter<Priority> delegate;
+    private final Tiered delegate;
 
     public PriorityLimiter(Limit limit, TierShares shares) {
+        this(limit, shares, TierPolicy.none());
+    }
+
+    public PriorityLimiter(Limit limit, TierShares shares, TierPolicy policy) {
         Builder builder = new Builder();
         builder.limit(limit);
         for (Priority p : Priority.values()) {
             builder.partition(p.id(), shares.shares().get(p));
         }
-        this.delegate = builder.build();
+        this.delegate = new Tiered(builder, policy);
     }
 
     /**
@@ -62,6 +69,54 @@ public final class PriorityLimiter {
 
     public Optional<Limiter.Listener> acquire(Priority priority) {
         return delegate.acquire(priority);
+    }
+
+    /** The current adaptive limit. */
+    public int limit() {
+        return delegate.getLimit();
+    }
+
+    /** Requests admitted through the limiter and not yet finished. */
+    public int inflight() {
+        return delegate.getInflight();
+    }
+
+    /**
+     * The partitioned limiter plus {@link TierPolicy}. It subclasses Netflix's class so it can read
+     * the limit and the in flight count the library already maintains.
+     */
+    private static final class Tiered extends AbstractPartitionedLimiter<Priority> {
+        private final TierPolicy policy;
+        private final AtomicInteger floorInflight = new AtomicInteger();
+
+        Tiered(Builder builder, TierPolicy policy) {
+            super(builder);
+            this.policy = policy;
+        }
+
+        @Override
+        public Optional<Limiter.Listener> acquire(Priority priority) {
+            double fraction = policy.threshold(priority);
+            if (fraction < 1.0
+                    && getInflight() >= Math.max(1, (int) Math.ceil(fraction * getLimit()))) {
+                return createRejectedListener();
+            }
+            Optional<Limiter.Listener> admitted = super.acquire(priority);
+            if (admitted.isPresent() || priority != Priority.CRITICAL
+                    || policy.criticalFloor() == 0) {
+                return admitted;
+            }
+            // The limit is full. Critical may still use its reserved floor.
+            if (floorInflight.incrementAndGet() <= policy.criticalFloor()) {
+                return Optional.of(new Limiter.Listener() {
+                    @Override public void onSuccess() { floorInflight.decrementAndGet(); }
+                    @Override public void onIgnore() { floorInflight.decrementAndGet(); }
+                    @Override public void onDropped() { floorInflight.decrementAndGet(); }
+                });
+            }
+            floorInflight.decrementAndGet();
+            return admitted;
+        }
     }
 
     private static final class Builder

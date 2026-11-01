@@ -22,6 +22,12 @@ on:
       hold_s:
         description: Seconds to hold the peak (300 for a soak test)
         default: "30"
+      peak_mult:
+        description: Peak as a multiple of the 100 rps baseline
+        default: "6"
+      extra_env:
+        description: Extra settings, space separated KEY=VALUE (for example SIEVE_LIMIT_ALGO=vegas)
+        default: ""
 
 permissions:
   contents: read
@@ -56,8 +62,12 @@ jobs:
           MODES: ${{ inputs.modes }}
           SIEVE_CONTENTION: ${{ inputs.contention }}
           SIEVE_HOLD_S: ${{ inputs.hold_s }}
+          SIEVE_PEAK_MULT: ${{ inputs.peak_mult }}
+          EXTRA_ENV: ${{ inputs.extra_env }}
         run: |
           mkdir -p results
+          for kv in $EXTRA_ENV; do export "$kv"; done
+          echo "settings: $EXTRA_ENV peak ${SIEVE_PEAK_MULT}x hold ${SIEVE_HOLD_S}s pin=${SIEVE_PIN:-no}" > results/ci-spike.txt
           for r in $(seq 1 "$ROUNDS"); do
             for m in $MODES; do
               echo "=== round $r $m" >> results/ci-spike.txt

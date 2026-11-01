@@ -4,6 +4,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import dev.sieve.Admission;
 import dev.sieve.CpuSignal;
+import dev.sieve.Limits;
+import dev.sieve.TierPolicy;
 import dev.sieve.LatencySloSignal;
 import dev.sieve.Priority;
 import dev.sieve.PriorityLimiter;
@@ -91,11 +93,15 @@ public final class DemoServer implements AutoCloseable {
 
     static DemoServer start(ServerConfig c) throws IOException {
         CpuSignal cpu = null;
+        PriorityLimiter lim = switch (c.mode()) {
+            case "limiter", "shed" -> limiter(c);
+            default -> null;
+        };
         Sieve sieve = switch (c.mode()) {
             case "noshed", "fixed" -> null;
-            case "limiter" -> Sieve.builder(limiter(c)).build();
+            case "limiter" -> Sieve.builder(lim).build();
             case "shed" -> {
-                Sieve.Builder b = Sieve.builder(limiter(c));
+                Sieve.Builder b = Sieve.builder(lim);
                 // SIEVE_LATENCY=0 turns latency shedding off, to test the CPU signal alone.
                 if (!"0".equals(System.getenv("SIEVE_LATENCY"))) {
                     // Target: shed lower tiers, never critical, as requests pass the SLO.
@@ -123,6 +129,7 @@ public final class DemoServer implements AutoCloseable {
                 : null;
         Semaphore workers = new Semaphore(c.workers());
         Metrics metrics = new Metrics();
+        metrics.limiter(lim);
         // CPU-burning handlers must not run on virtual threads: they would pin the carriers.
         ExecutorService executor = c.backend().equals("cpu")
                 ? Executors.newCachedThreadPool() : Executors.newVirtualThreadPerTaskExecutor();
@@ -150,12 +157,27 @@ public final class DemoServer implements AutoCloseable {
         }
     }
 
+    /**
+     * The adaptive limiter. SIEVE_LIMIT_ALGO picks gradient2 (default) or vegas, SIEVE_TIERS=graded
+     * adds the graded tier thresholds, and SIEVE_CRITICAL_FLOOR reserves slots for critical.
+     */
     private static PriorityLimiter limiter(ServerConfig c) {
-        return c.windowed()
-                ? PriorityLimiter.withWindowedGradient2(
-                        TierShares.criticalFirst(), c.initialLimit(), c.minLimit(), c.maxLimit())
-                : PriorityLimiter.withGradient2(
-                        TierShares.criticalFirst(), c.initialLimit(), c.minLimit(), c.maxLimit());
+        String algo = System.getenv("SIEVE_LIMIT_ALGO") == null ? "gradient2"
+                : System.getenv("SIEVE_LIMIT_ALGO");
+        com.netflix.concurrency.limits.Limit limit = algo.equals("vegas")
+                ? Limits.windowedVegas(c.initialLimit(), c.maxLimit())
+                : c.windowed()
+                        ? Limits.windowedGradient2(c.initialLimit(), c.minLimit(), c.maxLimit())
+                        : com.netflix.concurrency.limits.limit.Gradient2Limit.newBuilder()
+                                .initialLimit(c.initialLimit()).minLimit(c.minLimit())
+                                .maxConcurrency(c.maxLimit()).build();
+        TierPolicy policy = "graded".equals(System.getenv("SIEVE_TIERS"))
+                ? TierPolicy.graded() : TierPolicy.none();
+        String floor = System.getenv("SIEVE_CRITICAL_FLOOR");
+        if (floor != null) {
+            policy = policy.withCriticalFloor(Integer.parseInt(floor));
+        }
+        return new PriorityLimiter(limit, TierShares.criticalFirst(), policy);
     }
 
     private static void work(ServerConfig c) throws InterruptedException {

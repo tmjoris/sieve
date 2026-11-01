@@ -32,6 +32,13 @@ final class Metrics {
         return b.stream().mapToDouble(Double::doubleValue).toArray();
     }
 
+    private volatile dev.sieve.PriorityLimiter limiter;
+
+    /** Expose the limiter's current limit and in flight count as gauges. */
+    void limiter(dev.sieve.PriorityLimiter l) {
+        this.limiter = l;
+    }
+
     private final Map<Priority, Map<Outcome, LongAdder>> outcomes = new EnumMap<>(Priority.class);
     private final Map<Priority, LongAdder> arrived = new EnumMap<>(Priority.class);
     private final Map<Priority, LongAdder[]> buckets = new EnumMap<>(Priority.class);
@@ -86,6 +93,12 @@ final class Metrics {
                 .append(os.getProcessCpuLoad()).append('\n');
         sb.append("# TYPE jvm_system_cpu_load gauge\njvm_system_cpu_load ")
                 .append(os.getCpuLoad()).append('\n');
+        if (limiter != null) {
+            sb.append("# TYPE sieve_concurrency_limit gauge\nsieve_concurrency_limit ")
+                    .append(limiter.limit()).append('\n');
+            sb.append("# TYPE sieve_concurrency_inflight gauge\nsieve_concurrency_inflight ")
+                    .append(limiter.inflight()).append('\n');
+        }
         sb.append("# TYPE sieve_requests_arrived_total counter\n");
         for (Priority p : Priority.values()) {
             sb.append("sieve_requests_arrived_total{tier=\"").append(p.id()).append("\"} ")
