@@ -43,5 +43,6 @@ sleep 3
 $load_pin ./gradlew $gradle_flags -q :sieve-harness:gatlingRun --simulation dev.sieve.harness.SpikeSimulation > "build/gatling-$mode.log" 2>&1 \
   || { echo "gatling failed, see build/gatling-$mode.log"; exit 1; }
 curl -s localhost:8080/metrics > "build/metrics-$mode.txt"
+python3 scripts/summarize.py "$mode"
 noisy=$([ "$busy_before" -gt "$max_busy" ] && echo "NOISY" || echo "quiet")
 echo "host CPU busy before the run: ${busy_before}% (limit ${max_busy}%): $noisy"
